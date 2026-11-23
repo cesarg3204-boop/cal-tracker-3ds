@@ -99,3 +99,31 @@ jobs:
         with:
           name: cal-pop-cia
           path: cal-pop.cia
+
+  # Run by hand (Actions > Build > Run workflow): publishes the CIA as the
+  # "cal-pop-latest" release, so FBI can install it from a QR code.
+  release:
+    if: github.event_name == 'workflow_dispatch'
+    needs: build-cia
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: cal-pop-cia
+      - uses: actions/download-artifact@v4
+        with:
+          name: cal-pop
+      - name: Publish release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+        run: |
+          if gh release view cal-pop-latest >/dev/null 2>&1; then
+            gh release upload cal-pop-latest cal-pop.cia cal-pop.3dsx --clobber
+          else
+            gh release create cal-pop-latest cal-pop.cia cal-pop.3dsx --prerelease \
+              --target "$GITHUB_SHA" --title "Cal Pop (latest build)" \
+              --notes "Scan the QR code in FBI (Remote Install > Scan QR Code) to install cal-pop.cia."
+          fi
