@@ -31,7 +31,7 @@ float bmi(float kg, float height_cm)
     return kg / (m * m);
 }
 
-float bmr(const Profile *p, float kg)
+float bmr(const UserProfile *p, float kg)
 {
     if (kg <= 0 || p->height_cm <= 0 || p->age <= 0)
         return 0;
@@ -89,7 +89,7 @@ static float num(const cJSON *obj, const char *key)
     return cJSON_IsNumber(v) ? (float)v->valuedouble : 0.0f;
 }
 
-int profile_load(Profile *p)
+int profile_load(UserProfile *p)
 {
     memset(p, 0, sizeof *p);
     p->activity = ACTIVITY_MODERATE;
@@ -112,7 +112,7 @@ int profile_load(Profile *p)
     return 0;
 }
 
-int profile_save(const Profile *p)
+int profile_save(const UserProfile *p)
 {
     cJSON *root = cJSON_CreateObject();
     cJSON_AddNumberToObject(root, "age", p->age);

@@ -24,7 +24,7 @@ typedef struct {
     float height_cm;  /* 0 if unknown */
     float body_fat;   /* percent, 0 if unknown */
     Activity activity;
-} Profile;
+} UserProfile;
 
 /* One number per date: body weight (weights.json) or exercise kcal
  * (exercise.json). */
@@ -49,11 +49,11 @@ float activity_factor(Activity a);
 /* Body mass index, or 0 if weight or height is missing. */
 float bmi(float kg, float height_cm);
 /* Resting energy (Mifflin-St Jeor), kcal per day, or 0 if data is missing. */
-float bmr(const Profile *p, float kg);
+float bmr(const UserProfile *p, float kg);
 
 /* Uses the folder set by storage_init(). Missing files give defaults. */
-int profile_load(Profile *p);
-int profile_save(const Profile *p);
+int profile_load(UserProfile *p);
+int profile_save(const UserProfile *p);
 
 int series_load(Series *s, const char *file);
 int series_save(const Series *s, const char *file);

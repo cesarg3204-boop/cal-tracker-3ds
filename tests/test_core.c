@@ -258,7 +258,7 @@ static void test_cache_full(void)
 
 static void test_profile(void)
 {
-    Profile p;
+    UserProfile p;
     memset(&p, 0, sizeof p);
     p.age = 14;
     p.sex = SEX_MALE;
@@ -278,7 +278,7 @@ static void test_profile(void)
     char dir[] = "/tmp/ct_prof_XXXXXX";
     CHECK(mkdtemp(dir) != NULL);
     CHECK(storage_init(dir) == 0);
-    Profile q;
+    UserProfile q;
     CHECK(profile_load(&q) == 0 && q.age == 0 && q.activity == ACTIVITY_MODERATE);
     CHECK(profile_save(&p) == 0);
     CHECK(profile_load(&q) == 0);

@@ -146,7 +146,7 @@ static Targets g_targets;
 static FavList g_favs;
 static MealList g_meals;
 static BrandList g_brands;
-static Profile g_profile;
+static UserProfile g_profile;
 static Series g_weights, g_exercise;
 static char g_today[CT_DATE_LEN];
 
@@ -743,7 +743,7 @@ static void save_profile(void)
 
 static void edit_profile_row(ProfileRow row)
 {
-    Profile *p = &g_profile;
+    UserProfile *p = &g_profile;
     float v;
     switch (row) {
     case PR_AGE:
@@ -1514,7 +1514,7 @@ static float profile_row_y(int row)
 
 static void profile_value(ProfileRow row, char *out, size_t size)
 {
-    const Profile *p = &g_profile;
+    const UserProfile *p = &g_profile;
     float kg = current_weight();
     switch (row) {
     case PR_AGE:
