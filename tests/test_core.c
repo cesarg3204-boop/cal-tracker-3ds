@@ -99,6 +99,18 @@ static void test_off(void)
     CHECK(n == 1);
     CHECK(strcmp(foods[0].brand, "Oatly") == 0);
     CHECK(NEAR(foods[0].carbs, 6.7f));
+
+    /* Spanish name preferred; Cyrillic-only names dropped; accents kept */
+    const char *mixed =
+        "{\"hits\":["
+        "{\"product_name\":\"\u0421\u043e\u0443\u0441 \u0441\u044b\u0440\u043d\u044b\u0439\",\"nutriments\":{\"energy-kcal_100g\":92}},"
+        "{\"product_name\":\"Fries\",\"product_name_es\":\"Papas fritas\",\"nutriments\":{\"energy-kcal_100g\":337}},"
+        "{\"product_name\":\"Caf\u00e9 cr\u00e8me McDonald\u2019s\",\"nutriments\":{\"energy-kcal_100g\":40}}"
+        "]}";
+    n = off_parse_search(mixed, foods, 5);
+    CHECK(n == 2);
+    CHECK(strcmp(foods[0].name, "Papas fritas") == 0);
+    CHECK(strncmp(foods[1].name, "Caf", 3) == 0);
 }
 
 static void test_storage(void)

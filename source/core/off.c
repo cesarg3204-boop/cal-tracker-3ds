@@ -8,7 +8,9 @@
 
 #define OFF_SEARCH "https://search.openfoodfacts.org/search"
 #define OFF_CGI "https://world.openfoodfacts.org/cgi/search.pl"
-#define OFF_FIELDS "product_name,brands,nutriments,serving_quantity"
+#define OFF_FIELDS "product_name,product_name_es,product_name_en,brands,nutriments,serving_quantity"
+/* Ask for more than we show, because names in non-Latin scripts are dropped. */
+#define OFF_FETCH_SIZE (OFF_PAGE_SIZE * 2)
 
 static int url_encode(const char *in, char *out, size_t size)
 {
@@ -47,13 +49,13 @@ int off_search_url(int endpoint, const char *query, char *out, size_t size)
         return -1;
     int n;
     if (endpoint == 0)
-        n = snprintf(out, size, OFF_SEARCH "?q=%s&page_size=%d&fields=" OFF_FIELDS, enc,
-                     OFF_PAGE_SIZE);
+        n = snprintf(out, size, OFF_SEARCH "?q=%s&langs=es,en&page_size=%d&fields=" OFF_FIELDS,
+                     enc, OFF_FETCH_SIZE);
     else if (endpoint == 1)
         n = snprintf(out, size,
                      OFF_CGI "?search_terms=%s&search_simple=1&action=process&json=1"
                              "&page_size=%d&fields=" OFF_FIELDS,
-                     enc, OFF_PAGE_SIZE);
+                     enc, OFF_FETCH_SIZE);
     else
         return -1;
     return (n > 0 && (size_t)n < size) ? 0 : -1;
@@ -77,6 +79,41 @@ static int get_number(const cJSON *obj, const char *key, float *out)
     return 0;
 }
 
+/* True if every character is Latin (ASCII, accents, Latin Extended): U+0000..U+024F.
+ * Names in Cyrillic, Greek, Arabic, CJK and so on are skipped, since the user
+ * cannot read them. */
+static int is_latin(const char *s)
+{
+    for (const unsigned char *p = (const unsigned char *)s; *p; p++) {
+        if (*p < 0x80)
+            continue;
+        /* two-byte sequences with a lead byte up to 0xC9 encode U+0080..U+027F */
+        if (*p >= 0xC2 && *p <= 0xC9 && (p[1] & 0xC0) == 0x80) {
+            p++;
+            continue;
+        }
+        /* allow typographic punctuation such as the apostrophe U+2019 (E2 80 xx) */
+        if (*p == 0xE2 && p[1] == 0x80 && (p[2] & 0xC0) == 0x80) {
+            p += 2;
+            continue;
+        }
+        return 0;
+    }
+    return 1;
+}
+
+/* First non-empty string among the given keys. */
+static const char *first_name(const cJSON *p)
+{
+    static const char *keys[] = {"product_name_es", "product_name_en", "product_name"};
+    for (size_t i = 0; i < sizeof keys / sizeof keys[0]; i++) {
+        const cJSON *v = cJSON_GetObjectItemCaseSensitive(p, keys[i]);
+        if (cJSON_IsString(v) && v->valuestring[0])
+            return v->valuestring;
+    }
+    return NULL;
+}
+
 int off_parse_search(const char *json, Food *out, int max)
 {
     cJSON *root = cJSON_Parse(json);
@@ -96,9 +133,9 @@ int off_parse_search(const char *json, Food *out, int max)
     {
         if (n >= max)
             break;
-        const cJSON *name = cJSON_GetObjectItemCaseSensitive(p, "product_name");
+        const char *name = first_name(p);
         const cJSON *nutr = cJSON_GetObjectItemCaseSensitive(p, "nutriments");
-        if (!cJSON_IsString(name) || !name->valuestring[0] || !cJSON_IsObject(nutr))
+        if (!name || !is_latin(name) || !cJSON_IsObject(nutr))
             continue;
 
         Food f;
@@ -114,7 +151,7 @@ int off_parse_search(const char *json, Food *out, int max)
         get_number(nutr, "fat_100g", &f.fat);
         get_number(p, "serving_quantity", &f.serving_g);
 
-        ct_strlcpy(f.name, name->valuestring, sizeof f.name);
+        ct_strlcpy(f.name, name, sizeof f.name);
         const cJSON *brands = cJSON_GetObjectItemCaseSensitive(p, "brands");
         if (cJSON_IsArray(brands))
             brands = cJSON_GetArrayItem(brands, 0); /* newer API: a list of brands */
