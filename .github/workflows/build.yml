@@ -19,8 +19,12 @@ jobs:
     container: devkitpro/devkitarm:latest
     steps:
       - uses: actions/checkout@v4
-      - name: Install portlibs
-        run: dkp-pacman -Sy --noconfirm --needed 3ds-curl 3ds-mbedtls 3ds-zlib
+      # The devkitarm image already ships the 3DS portlibs, and pkg.devkitpro.org
+      # refuses package downloads from CI runners, so only check that they are there.
+      - name: Check portlibs
+        run: |
+          ls $DEVKITPRO/portlibs/3ds/lib
+          test -f $DEVKITPRO/portlibs/3ds/lib/libcurl.a
       - name: Build
         run: make
       - uses: actions/upload-artifact@v4
