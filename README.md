@@ -15,11 +15,17 @@ A standalone calorie and macro tracker for the Nintendo 3DS (homebrew). It keeps
 
 ## Cal Pop extras
 
-- Touch tab bar on the bottom screen: Today, Search, Brands, Favs, Meals (L and R also switch tabs).
+- One color gradient everywhere: green, turquoise, blue.
+- Touch tab bar on the bottom screen: Today, Search, Brands, Favs, Meals, Profile (L and R also switch tabs).
 - **Favorites:** press X on any food to star it; on the Favs tab, A logs it with its usual grams.
 - **Quick add:** type a name with calories and macros, no grams needed.
-- **Saved meals:** on Today, select a food and tap *Save as meal* to save everything in that meal (for example all of Breakfast). Log it later from the Meals tab, normal size or scaled.
-- **My Brands:** follow brands like Quest or Barebells and browse their products. Product lists are saved for offline use; Y refreshes.
+- **Saved meals:** on Meals, tap *+ New meal* and name it. Then pick foods the same way you log them: A on Search, Favs or Brands adds the food to the meal instead of your day. *Quick item* adds a name with macros. Tap the strip at the bottom to go back and *Save meal*. Log it later from the Meals tab, normal size or scaled.
+- **My Brands:** follow brands like Quest or Barebells and browse their products. Small typos are fixed for you (typing "goodless" finds Goodles and renames the tile). Product lists are saved for offline use; Y refreshes.
+- **Profile** (Left/Right switch pages):
+  - *Profile:* age, sex, weight log, height, BMI, body fat, activity level and your daily targets.
+  - *Report:* eaten vs burned for the day. Burned is resting energy (Mifflin-St Jeor BMR) plus basic activity plus any exercise you enter.
+  - *Charts:* calories per day for the week, split into protein, carbs and fat, and a weight line.
+- HOME menu banner: one macaroni with a short jingle (CIA only; made by `tools/make_assets.py`).
 - "Adding to" picker on the bottom screen (or Left/Right) chooses the meal food goes into.
 
 ## Controls (plain version)
@@ -44,7 +50,7 @@ Each **Build** run on the Actions tab has two downloads:
 - `cal-pop-cia`: a CIA to install with FBI, or to open in an emulator (File > Install CIA).
 - `cal-pop`: a `.3dsx` for the Homebrew Launcher; copy it to `sdmc:/3ds/`.
 
-Data lives in `sdmc:/3ds/caltracker/`: `log/YYYY-MM-DD.json` per day, `foods.json` for saved foods and `targets.json` for your targets.
+Data lives in `sdmc:/3ds/caltracker/`: `log/YYYY-MM-DD.json` per day, `foods.json` for saved foods, `targets.json` for your targets, plus Cal Pop's `favorites.json`, `meals.json`, `brands.json`, `profile.json`, `weights.json` and `exercise.json`.
 
 ## Build
 

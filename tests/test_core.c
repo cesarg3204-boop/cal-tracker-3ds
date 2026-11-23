@@ -7,6 +7,7 @@
 #include "../source/core/date.h"
 #include "../source/core/food.h"
 #include "../source/core/off.h"
+#include "../source/core/profile.h"
 #include "../source/core/storage.h"
 
 static int failures = 0;
@@ -114,7 +115,9 @@ static void test_off(void)
 
     /* brand pages: keep only that brand, drop duplicate names */
     CHECK(off_brand_url(0, "Quest", url, sizeof url) == 0 && strstr(url, "q=Quest&") != NULL);
-    CHECK(off_brand_url(1, "Quest", url, sizeof url) == 0 && strstr(url, "tag_0=Quest&") != NULL);
+    CHECK(off_brand_url(1, "Quest", url, sizeof url) == 0 && strstr(url, "q=Quest~&") != NULL);
+    CHECK(off_brand_url(2, "Quest", url, sizeof url) == 0 && strstr(url, "tag_0=Quest&") != NULL);
+    CHECK(off_brand_url(3, "Quest", url, sizeof url) == -1);
     const char *brand_json =
         "{\"hits\":["
         "{\"product_name\":\"Cookies & Cream Bar\",\"brands\":[\"Quest Nutrition\"],\"nutriments\":{\"energy-kcal_100g\":350}},"
@@ -126,6 +129,16 @@ static void test_off(void)
     CHECK(n == 2);
     CHECK(strcmp(foods[0].name, "Cookies & Cream Bar") == 0);
     CHECK(strcmp(foods[1].name, "Tortilla Style Chips") == 0);
+
+    /* a typo in the brand still matches ("goodless" -> "Goodles"), others don't */
+    const char *typo_json =
+        "{\"hits\":["
+        "{\"product_name\":\"Cheddy Mac\",\"brands\":\"Goodles\",\"nutriments\":{\"energy-kcal_100g\":380}},"
+        "{\"product_name\":\"Goodness Bar\",\"brands\":\"Nature Valley\",\"nutriments\":{\"energy-kcal_100g\":450}}"
+        "]}";
+    n = off_parse_brand(typo_json, "goodless", foods, 5);
+    CHECK(n == 1 && strcmp(foods[0].brand, "Goodles") == 0);
+    CHECK(off_text_contains("Quest Nutrition", "NUTRI") && !off_text_contains("Quest", "Barebells"));
 }
 
 static void test_storage(void)
@@ -243,6 +256,54 @@ static void test_cache_full(void)
     CHECK(strcmp(cache.items[0].name, name) == 0);
 }
 
+static void test_profile(void)
+{
+    Profile p;
+    memset(&p, 0, sizeof p);
+    p.age = 14;
+    p.sex = SEX_MALE;
+    p.height_cm = 170;
+    p.body_fat = 15;
+    p.activity = ACTIVITY_LIGHT;
+    /* Matches Cronometer: 10*53 + 6.25*170 - 5*14 + 5 = 1527.5 */
+    CHECK(fabsf(bmr(&p, 53) - 1527.5f) < 0.1f);
+    CHECK(fabsf(bmi(53, 170) - 18.34f) < 0.01f);
+    CHECK(bmi(0, 170) == 0 && bmr(&p, 0) == 0);
+    p.sex = SEX_FEMALE;
+    CHECK(fabsf(bmr(&p, 53) - 1361.5f) < 0.1f);
+    CHECK(activity_factor(ACTIVITY_SEDENTARY) < activity_factor(ACTIVITY_VERY_ACTIVE));
+    /* Cronometer's default "basic activity" is half of BMR */
+    CHECK(NEAR(activity_factor(ACTIVITY_MODERATE), 1.5f));
+
+    char dir[] = "/tmp/ct_prof_XXXXXX";
+    CHECK(mkdtemp(dir) != NULL);
+    CHECK(storage_init(dir) == 0);
+    Profile q;
+    CHECK(profile_load(&q) == 0 && q.age == 0 && q.activity == ACTIVITY_MODERATE);
+    CHECK(profile_save(&p) == 0);
+    CHECK(profile_load(&q) == 0);
+    CHECK(q.age == 14 && q.sex == SEX_FEMALE && NEAR(q.height_cm, 170) && NEAR(q.body_fat, 15));
+
+    static Series log, log2;
+    CHECK(series_load(&log, WEIGHTS_FILE) == 0 && log.count == 0);
+    CHECK(series_latest(&log, NULL) == 0);
+    series_set(&log, "2026-11-20", 53.0f);
+    series_set(&log, "2026-11-10", 52.0f);
+    series_set(&log, "2026-11-15", 52.5f);
+    series_set(&log, "2026-11-15", 52.6f);
+    CHECK(log.count == 3 && strcmp(log.items[0].date, "2026-11-10") == 0);
+    CHECK(NEAR(log.items[1].value, 52.6f));
+    CHECK(NEAR(series_latest(&log, NULL), 53.0f));
+    CHECK(NEAR(series_latest(&log, "2026-11-16"), 52.6f));
+    CHECK(series_latest(&log, "2026-11-01") == 0);
+    CHECK(NEAR(series_get(&log, "2026-11-10"), 52.0f) && series_get(&log, "2026-11-11") == 0);
+    CHECK(series_save(&log, WEIGHTS_FILE) == 0);
+    CHECK(series_load(&log2, WEIGHTS_FILE) == 0 && log2.count == 3 && NEAR(log2.items[2].value, 53.0f));
+    series_set(&log2, "2026-11-15", 0);
+    CHECK(log2.count == 2 && series_get(&log2, "2026-11-15") == 0);
+    CHECK(series_load(&log, EXERCISE_FILE) == 0 && log.count == 0);
+}
+
 int main(void)
 {
     test_totals();
@@ -250,6 +311,7 @@ int main(void)
     test_off();
     test_storage();
     test_cache_full();
+    test_profile();
     if (failures) {
         fprintf(stderr, "%d check(s) failed\n", failures);
         return 1;

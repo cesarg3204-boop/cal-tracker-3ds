@@ -21,9 +21,16 @@ int off_parse_search(const char *json, Food *out, int max);
 
 /* Products of one brand. */
 #define OFF_BRAND_FETCH 100
+/* Brand endpoints, tried in order: exact text, fuzzy text (catches typos like
+ * "goodless" for "Goodles"), then the older cgi brand filter. */
+#define OFF_BRAND_ENDPOINTS 3
 int off_brand_url(int endpoint, const char *brand, char *out, size_t size);
-/* Like off_parse_search, but keeps only products whose brand list contains
- * `brand` (case-insensitive) and drops duplicate names. */
+
+/* Case-insensitive (ASCII) substring test. */
+int off_text_contains(const char *hay, const char *needle);
+/* Like off_parse_search, but keeps only products whose brand matches `brand`
+ * (contains it, ignoring case, or is within a small typo distance) and drops
+ * duplicate names. */
 int off_parse_brand(const char *json, const char *brand, Food *out, int max);
 
 #endif

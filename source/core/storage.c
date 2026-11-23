@@ -128,9 +128,14 @@ static void entry_from_json(const cJSON *obj, Entry *e)
     e->quick = cJSON_IsTrue(cJSON_GetObjectItemCaseSensitive(obj, "quick"));
 }
 
-static void path_for(char *out, size_t size, const char *name)
+void storage_path(char *out, size_t size, const char *name)
 {
     snprintf(out, size, "%s/%s", g_base, name);
+}
+
+static void path_for(char *out, size_t size, const char *name)
+{
+    storage_path(out, size, name);
 }
 
 /* ---- public API ------------------------------------------------------- */

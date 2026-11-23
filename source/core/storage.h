@@ -27,6 +27,8 @@ typedef struct {
 
 /* Set the data folder (e.g. "sdmc:/3ds/caltracker") and create it. */
 int storage_init(const char *base_dir);
+/* Full path of a file in the data folder. */
+void storage_path(char *out, size_t size, const char *name);
 
 /* A missing file is not an error: you get an empty day / cache / defaults. */
 int day_load(const char *date, DayLog *day);

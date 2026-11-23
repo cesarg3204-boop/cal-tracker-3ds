@@ -1,9 +1,11 @@
 /* Cal Pop: a colorful calorie and macro tracker for the 3DS.
  *
  * Top screen:    the current tab's content (today's log, search results,
- *                brand tiles and products, favorites, saved meals).
+ *                brand tiles and products, favorites, saved meals, profile).
  * Bottom screen: details of the selected item, touch buttons, and a tab bar.
  * Every touch button also has a button shortcut, shown on its label.
+ *
+ * Colors follow one gradient: green -> turquoise -> blue.
  */
 #include <3ds.h>
 #include <citro2d.h>
@@ -16,6 +18,7 @@
 #include "core/date.h"
 #include "core/food.h"
 #include "core/off.h"
+#include "core/profile.h"
 #include "core/storage.h"
 #include "net.h"
 
@@ -27,57 +30,78 @@
 #define TEXT_SCALE 0.5f
 #define MAX_BRAND_FOODS 60
 
-/* ---- palette (bright, playful) ------------------------------------------ */
-static u32 C_BG, C_PANEL, C_PANEL2, C_TEXT, C_INK, C_MUTED, C_BAR_BG;
-static u32 C_PINK, C_ORANGE, C_YELLOW, C_TEAL, C_LIME, C_BLUE, C_RED;
+/* ---- palette ------------------------------------------------------------ */
+static u32 C_BG, C_PANEL, C_PANEL2, C_TEXT, C_INK, C_MUTED, C_BAR_BG, C_WARN, C_MINT;
+static u32 C_GREEN, C_TURQ, C_BLUE;
 static u32 C_PROTEIN, C_CARBS, C_FAT;
+/* Button color meaning "take it from the gradient at the button's spot".
+ * Real colors always have alpha 0xff, so they are never 0. */
+#define C_GRAD 0u
 
 static void init_colors(void)
 {
-    C_BG = C2D_Color32(0x2a, 0x16, 0x50, 0xff);     /* deep grape */
-    C_PANEL = C2D_Color32(0x3d, 0x22, 0x72, 0xff);  /* lighter grape */
-    C_PANEL2 = C2D_Color32(0x4e, 0x2e, 0x8c, 0xff); /* selection */
+    C_BG = C2D_Color32(0x0b, 0x1d, 0x2a, 0xff);     /* deep navy teal */
+    C_PANEL = C2D_Color32(0x12, 0x30, 0x3f, 0xff);
+    C_PANEL2 = C2D_Color32(0x1b, 0x43, 0x57, 0xff); /* selection */
     C_TEXT = C2D_Color32(0xff, 0xff, 0xff, 0xff);
-    C_INK = C2D_Color32(0x1d, 0x0f, 0x38, 0xff); /* dark text on bright fills */
-    C_MUTED = C2D_Color32(0xcd, 0xb8, 0xf5, 0xff);
-    C_BAR_BG = C2D_Color32(0x55, 0x3a, 0x8f, 0xff);
-    C_PINK = C2D_Color32(0xff, 0x4f, 0xa3, 0xff);
-    C_ORANGE = C2D_Color32(0xff, 0x8a, 0x1f, 0xff);
-    C_YELLOW = C2D_Color32(0xff, 0xd2, 0x3f, 0xff);
-    C_TEAL = C2D_Color32(0x22, 0xd3, 0xc5, 0xff);
-    C_LIME = C2D_Color32(0xa3, 0xe6, 0x35, 0xff);
-    C_BLUE = C2D_Color32(0x4d, 0x8c, 0xff, 0xff);
-    C_RED = C2D_Color32(0xff, 0x5a, 0x4e, 0xff);
-    C_PROTEIN = C_BLUE;
-    C_CARBS = C_ORANGE;
-    C_FAT = C_PINK;
+    C_INK = C2D_Color32(0x05, 0x1e, 0x22, 0xff); /* dark text on bright fills */
+    C_MUTED = C2D_Color32(0x9e, 0xd9, 0xd2, 0xff);
+    C_BAR_BG = C2D_Color32(0x1e, 0x4a, 0x5c, 0xff);
+    C_WARN = C2D_Color32(0xfb, 0x71, 0x85, 0xff); /* over a target */
+    C_MINT = C2D_Color32(0xbb, 0xf7, 0xd0, 0xff); /* favorites, status line */
+    C_GREEN = C2D_Color32(0x22, 0xc5, 0x5e, 0xff);
+    C_TURQ = C2D_Color32(0x2d, 0xd4, 0xbf, 0xff);
+    C_BLUE = C2D_Color32(0x3b, 0x82, 0xf6, 0xff);
+    C_PROTEIN = C_GREEN;
+    C_CARBS = C_TURQ;
+    C_FAT = C_BLUE;
+}
+
+/* The app gradient at t (0 = green, 0.5 = turquoise, 1 = blue). */
+static u32 grad(float t)
+{
+    static const u8 stops[3][3] = {{0x22, 0xc5, 0x5e}, {0x2d, 0xd4, 0xbf}, {0x3b, 0x82, 0xf6}};
+    if (t < 0) t = 0;
+    if (t > 1) t = 1;
+    int s = t < 0.5f ? 0 : 1;
+    float f = (t - s * 0.5f) * 2;
+    u8 c[3];
+    for (int i = 0; i < 3; i++)
+        c[i] = (u8)(stops[s][i] + (stops[s + 1][i] - stops[s][i]) * f + 0.5f);
+    return C2D_Color32(c[0], c[1], c[2], 0xff);
 }
 
 /* ---- tabs and actions --------------------------------------------------- */
-typedef enum { TAB_TODAY, TAB_SEARCH, TAB_BRANDS, TAB_FAVS, TAB_MEALS, TAB_COUNT } Tab;
-static const char *TAB_NAMES[TAB_COUNT] = {"Today", "Search", "Brands", "Favs", "Meals"};
+typedef enum { TAB_TODAY, TAB_SEARCH, TAB_BRANDS, TAB_FAVS, TAB_MEALS, TAB_PROFILE, TAB_COUNT } Tab;
+static const char *TAB_NAMES[TAB_COUNT] = {"Today", "Search", "Brands", "Favs", "Meals", "Profile"};
 
-static u32 tab_color(Tab t)
-{
-    switch (t) {
-    case TAB_TODAY: return C_ORANGE;
-    case TAB_SEARCH: return C_TEAL;
-    case TAB_BRANDS: return C_PINK;
-    case TAB_FAVS: return C_YELLOW;
-    default: return C_LIME;
-    }
-}
+typedef enum { PAGE_PROFILE, PAGE_REPORT, PAGE_CHARTS, PAGE_COUNT } Page;
+static const char *PAGE_NAMES[PAGE_COUNT] = {"Profile", "Report", "Charts"};
+
+typedef enum {
+    PR_AGE,
+    PR_SEX,
+    PR_WEIGHT,
+    PR_HEIGHT,
+    PR_BMI,
+    PR_BODY_FAT,
+    PR_ACTIVITY,
+    PR_KCAL,
+    PR_PROTEIN,
+    PR_CARBS,
+    PR_FAT,
+    PR_COUNT
+} ProfileRow;
 
 typedef enum {
     ACT_NONE,
     ACT_GO_SEARCH,
+    ACT_GO_MEALS,
     ACT_LOG,
     ACT_LOG_GRAMS,
     ACT_STAR,
     ACT_SEARCH,
     ACT_QUICK,
-    ACT_SAVE_MEAL,
-    ACT_TARGETS,
     ACT_PREV_DAY,
     ACT_NEXT_DAY,
     ACT_TODAY,
@@ -91,6 +115,17 @@ typedef enum {
     ACT_MEAL_PREV,
     ACT_MEAL_NEXT,
     ACT_LOG_SCALED,
+    ACT_NEW_MEAL,
+    ACT_SAVE_DRAFT,
+    ACT_CANCEL_DRAFT,
+    ACT_PAGE_PROFILE,
+    ACT_PAGE_REPORT,
+    ACT_PAGE_CHARTS,
+    ACT_EDIT_ROW,
+    ACT_LOG_WEIGHT,
+    ACT_EXERCISE,
+    ACT_PREV_WEEK,
+    ACT_NEXT_WEEK,
 } Action;
 
 typedef struct {
@@ -111,9 +146,12 @@ static Targets g_targets;
 static FavList g_favs;
 static MealList g_meals;
 static BrandList g_brands;
+static Profile g_profile;
+static Series g_weights, g_exercise;
 static char g_today[CT_DATE_LEN];
 
 static Tab g_tab = TAB_TODAY;
+static Page g_page = PAGE_PROFILE;
 static int g_sel[TAB_COUNT], g_scroll[TAB_COUNT];
 static Meal g_slot = MEAL_BREAKFAST; /* where new food is logged */
 
@@ -126,6 +164,16 @@ static int g_brand_open = -1; /* index into g_brands while browsing a brand */
 static Food g_brand_foods[MAX_BRAND_FOODS];
 static int g_brand_count = 0;
 static int g_brand_sel = 0, g_brand_scroll = 0;
+
+/* Meal builder: while on, "A" on Search, Favs and Brands adds to the draft. */
+static bool g_building = false;
+static SavedMeal g_draft;
+
+/* The 7 days ending on the viewed day, for the charts. */
+#define WEEK 7
+static Totals g_week[WEEK];
+static char g_week_dates[WEEK][CT_DATE_LEN];
+static bool g_week_dirty = true;
 
 typedef enum { PEND_NONE, PEND_SEARCH, PEND_BRAND } Pending;
 static Pending g_pending = PEND_NONE;
@@ -162,19 +210,54 @@ static void rrect(float x, float y, float w, float h, float r, u32 color)
     C2D_DrawCircleSolid(x + w - r, y + h - r, 0.4f, r, color);
 }
 
+/* Left-to-right gradient from grad(t0) to grad(t1), in slices so the
+ * turquoise middle shows on wide shapes. */
+static void grad_rect(float x, float y, float w, float h, float t0, float t1)
+{
+    if (w <= 0)
+        return;
+    const int n = 4;
+    float sw = w / n;
+    for (int i = 0; i < n; i++) {
+        u32 a = grad(t0 + (t1 - t0) * i / n), b = grad(t0 + (t1 - t0) * (i + 1) / n);
+        float ww = i == n - 1 ? sw : sw + 0.5f; /* overlap to hide seams */
+        C2D_DrawRectangle(x + i * sw, y, 0.4f, ww, h, a, b, a, b);
+    }
+}
+
+static void rrect_grad(float x, float y, float w, float h, float r, float t0, float t1)
+{
+    if (r * 2 > h) r = h / 2;
+    if (r * 2 > w) r = w / 2;
+    u32 cl = grad(t0), cr = grad(t1);
+    grad_rect(x + r, y, w - 2 * r, h, t0, t1);
+    C2D_DrawRectSolid(x, y + r, 0.4f, r, h - 2 * r, cl);
+    C2D_DrawRectSolid(x + w - r, y + r, 0.4f, r, h - 2 * r, cr);
+    C2D_DrawCircleSolid(x + r, y + r, 0.4f, r, cl);
+    C2D_DrawCircleSolid(x + r, y + h - r, 0.4f, r, cl);
+    C2D_DrawCircleSolid(x + w - r, y + r, 0.4f, r, cr);
+    C2D_DrawCircleSolid(x + w - r, y + h - r, 0.4f, r, cr);
+}
+
+/* Progress bar. color C_GRAD fills with the gradient. */
 static void bar(float x, float y, float w, float h, float value, float target, u32 color)
 {
     rrect(x, y, w, h, h / 2, C_BAR_BG);
     if (target <= 0 || value <= 0)
         return;
     float frac = value / target;
-    u32 c = frac > 1.0f ? C_RED : color;
-    if (frac > 1.0f)
+    bool over = frac > 1.0f;
+    if (over)
         frac = 1.0f;
     float fw = w * frac;
     if (fw < h)
         fw = h; /* keep the rounded end visible */
-    rrect(x, y, fw, h, h / 2, c);
+    if (over)
+        rrect(x, y, fw, h, h / 2, C_WARN);
+    else if (color == C_GRAD)
+        rrect_grad(x, y, fw, h, h / 2, 0, frac);
+    else
+        rrect(x, y, fw, h, h / 2, color);
 }
 
 static void status(const char *fmt, ...)
@@ -248,6 +331,7 @@ static void load_day(const char *date)
         status("Could not read the log for %s", date);
     rebuild_order();
     reset_list(TAB_TODAY);
+    g_week_dirty = true;
 }
 
 static void save_day(void)
@@ -255,6 +339,7 @@ static void save_day(void)
     if (day_save(&g_day) != 0)
         status("Could not save to the SD card");
     rebuild_order();
+    g_week_dirty = true;
 }
 
 static Meal meal_for_now(void)
@@ -294,12 +379,48 @@ static bool log_food_grams(const Food *food, float grams)
     return true;
 }
 
-static bool log_food_ask(const Food *food)
+/* Meal builder: add a food to the meal being built. */
+static bool draft_add(const Entry *e)
+{
+    if (g_draft.count >= CT_MAX_MEAL_ITEMS) {
+        status("A meal holds up to %d foods", CT_MAX_MEAL_ITEMS);
+        return false;
+    }
+    g_draft.items[g_draft.count++] = *e;
+    status("Added %.24s to \"%.20s\" (%d foods)", e->food.name, g_draft.name, (int)g_draft.count);
+    return true;
+}
+
+static void draft_add_food(const Food *food, float grams)
+{
+    Entry e;
+    memset(&e, 0, sizeof e);
+    e.food = *food;
+    e.grams = grams;
+    if (draft_add(&e)) {
+        foods_touch(&g_cache, food);
+        foods_save(&g_cache);
+    }
+}
+
+/* "A" on a food: log it, or add it to the meal being built. */
+static void use_food_ask(const Food *food)
 {
     float grams = food->serving_g > 0 ? food->serving_g : 100.0f;
-    if (!prompt_number("Grams eaten", grams, &grams) || grams <= 0)
-        return false;
-    return log_food_grams(food, grams);
+    if (!prompt_number(g_building ? "Grams in this meal" : "Grams eaten", grams, &grams) || grams <= 0)
+        return;
+    if (g_building)
+        draft_add_food(food, grams);
+    else
+        log_food_grams(food, grams);
+}
+
+static void use_food_grams(const Food *food, float grams)
+{
+    if (g_building)
+        draft_add_food(food, grams);
+    else
+        log_food_grams(food, grams);
 }
 
 static void toggle_star(const Food *food, float grams)
@@ -318,10 +439,38 @@ static bool is_fav(const Food *food)
     return favs_find(&g_favs, food) >= 0;
 }
 
+static float current_weight(void)
+{
+    return series_latest(&g_weights, NULL);
+}
+
+static void compute_week(void)
+{
+    static DayLog tmp;
+    for (int i = 0; i < WEEK; i++) {
+        char *d = g_week_dates[i];
+        if (date_add_days(g_day.date, i - (WEEK - 1), d) != 0) {
+            d[0] = '\0';
+            memset(&g_week[i], 0, sizeof g_week[i]);
+            continue;
+        }
+        if (strcmp(d, g_day.date) == 0)
+            g_week[i] = sum_entries(g_day.entries, g_day.count, -1);
+        else if (day_load(d, &tmp) == 0)
+            g_week[i] = sum_entries(tmp.entries, tmp.count, -1);
+        else
+            memset(&g_week[i], 0, sizeof g_week[i]);
+    }
+    g_week_dirty = false;
+}
+
 /* ---- selection helpers -------------------------------------------------- */
 static int visible_rows(Tab t)
 {
-    return t == TAB_TODAY ? 10 : 13;
+    if (t == TAB_TODAY) return 10;
+    if (t == TAB_PROFILE) return PR_COUNT;
+    if (t == TAB_MEALS && g_building) return 12;
+    return 13;
 }
 
 static void move_sel(int *sel, int *scroll, int delta, int count, int rows)
@@ -345,7 +494,8 @@ static int list_count(Tab t)
     case TAB_SEARCH: return g_have_results ? g_result_count : (int)g_cache.count;
     case TAB_BRANDS: return g_brand_open >= 0 ? g_brand_count : (int)g_brands.count;
     case TAB_FAVS: return (int)g_favs.count;
-    default: return (int)g_meals.count;
+    case TAB_MEALS: return g_building ? (int)g_draft.count : (int)g_meals.count;
+    default: return g_page == PAGE_PROFILE ? PR_COUNT : 0;
     }
 }
 
@@ -392,12 +542,44 @@ static void run_search(void)
     status("Search failed: %s", err);
 }
 
+static bool same_text(const char *a, const char *b)
+{
+    return strlen(a) == strlen(b) && off_text_contains(a, b);
+}
+
+/* If the products found carry a different brand name than the one typed
+ * (a fuzzy match, like "goodless" finding "Goodles"), rename the tile. */
+static void fix_brand_name(void)
+{
+    const char *found = g_brand_foods[0].brand;
+    const char *typed = g_brands.names[g_brand_open];
+    if (!found[0] || off_text_contains(found, typed))
+        return;
+    char real[CT_BRAND_LEN];
+    ct_strlcpy(real, found, sizeof real);
+    char *comma = strchr(real, ',');
+    if (comma)
+        *comma = '\0';
+    size_t len = strlen(real);
+    while (len > 0 && real[len - 1] == ' ')
+        real[--len] = '\0';
+    if (len == 0)
+        return;
+    for (size_t i = 0; i < g_brands.count; i++)
+        if ((int)i != g_brand_open && same_text(g_brands.names[i], real))
+            return; /* already followed under the real name */
+    ct_strlcpy(g_brands.names[g_brand_open], real, CT_BRAND_LEN);
+    brands_save(&g_brands);
+}
+
 static void fetch_brand(void)
 {
-    const char *brand = g_brands.names[g_brand_open];
+    char brand[CT_BRAND_LEN];
+    ct_strlcpy(brand, g_brands.names[g_brand_open], sizeof brand);
     char url[512];
     char err[96] = "";
-    for (int ep = 0; ep < OFF_ENDPOINT_COUNT; ep++) {
+    bool answered = false; /* a server replied properly, even with no products */
+    for (int ep = 0; ep < OFF_BRAND_ENDPOINTS; ep++) {
         if (off_brand_url(ep, brand, url, sizeof url) != 0)
             break;
         char *body = NULL;
@@ -409,14 +591,23 @@ static void fetch_brand(void)
             snprintf(err, sizeof err, "unexpected reply");
             continue;
         }
-        if (n == 0 && ep + 1 < OFF_ENDPOINT_COUNT)
-            continue; /* the other endpoint filters by brand more strictly */
+        answered = true;
+        if (n == 0)
+            continue; /* try a looser search */
         g_brand_count = n;
-        brand_cache_save(brand, g_brand_foods, n);
-        status(n ? "%d %.20s products" : "No products found for %.20s", n, brand);
+        fix_brand_name();
+        brand_cache_save(g_brands.names[g_brand_open], g_brand_foods, n);
+        if (same_text(brand, g_brands.names[g_brand_open]))
+            status("%d %.20s products", n, brand);
+        else
+            status("Found %d products as \"%.20s\"", n, g_brands.names[g_brand_open]);
         return;
     }
-    status("Could not load %.20s: %s", brand, err);
+    g_brand_count = 0;
+    if (answered)
+        status("No products found for %.20s. Check the spelling", brand);
+    else
+        status("Could not load %.20s: %s", brand, err);
 }
 
 static void open_brand(int index)
@@ -425,7 +616,7 @@ static void open_brand(int index)
     g_brand_sel = 0;
     g_brand_scroll = 0;
     int n = brand_cache_load(g_brands.names[index], g_brand_foods, MAX_BRAND_FOODS);
-    if (n >= 0) {
+    if (n > 0) {
         g_brand_count = n;
         status("%d saved products. Y to refresh", n);
     } else if (g_net_ok) {
@@ -439,6 +630,7 @@ static void open_brand(int index)
 }
 
 /* ---- actions ------------------------------------------------------------ */
+/* Name and macros, no grams. Goes into the day, or into the meal being built. */
 static void quick_entry(void)
 {
     Entry e;
@@ -455,36 +647,15 @@ static void quick_entry(void)
     e.food.fat = f;
     e.grams = 100; /* values are totals: 100 g of "per 100 g" */
     e.quick = 1;
+    if (g_building) {
+        draft_add(&e);
+        return;
+    }
     e.meal = g_slot;
     if (!add_entry(&e))
         return;
     save_day();
     status("Quick added %.0f kcal to %s", kcal, meal_name(g_slot));
-}
-
-static void save_as_meal(void)
-{
-    Entry *sel = selected_entry();
-    if (!sel) {
-        status("Log some food first, then save it as a meal");
-        return;
-    }
-    Meal slot = sel->meal;
-    SavedMeal m;
-    memset(&m, 0, sizeof m);
-    for (size_t i = 0; i < g_day.count && m.count < CT_MAX_MEAL_ITEMS; i++)
-        if (g_day.entries[i].meal == slot)
-            m.items[m.count++] = g_day.entries[i];
-    char def[CT_NAME_LEN];
-    snprintf(def, sizeof def, "My %s", meal_name(slot));
-    if (!prompt_text("Name this meal", def, m.name, sizeof m.name))
-        return;
-    if (meals_add(&g_meals, &m) != 0) {
-        status("Saved meals are full (%d)", CT_MAX_SAVED_MEALS);
-        return;
-    }
-    meals_save(&g_meals);
-    status("Saved \"%.24s\" with %d foods", m.name, (int)m.count);
 }
 
 static void log_saved_meal(const SavedMeal *m, float factor)
@@ -509,17 +680,6 @@ static void log_saved_meal(const SavedMeal *m, float factor)
     status("Logged \"%.24s\" (%d foods) to %s", m->name, added, meal_name(g_slot));
 }
 
-static void edit_targets(void)
-{
-    Targets t = g_targets;
-    if (!prompt_number("Daily calories", t.kcal, &t.kcal)) return;
-    if (!prompt_number("Daily protein (g)", t.protein, &t.protein)) return;
-    if (!prompt_number("Daily carbs (g)", t.carbs, &t.carbs)) return;
-    if (!prompt_number("Daily fat (g)", t.fat, &t.fat)) return;
-    g_targets = t;
-    status(targets_save(&g_targets) == 0 ? "Targets saved" : "Could not save targets");
-}
-
 static void switch_tab(Tab t)
 {
     g_tab = t;
@@ -527,12 +687,134 @@ static void switch_tab(Tab t)
         g_status[0] = '\0';
 }
 
+static void start_meal(void)
+{
+    char name[CT_NAME_LEN] = "";
+    if (!prompt_text("Name your meal (e.g. Protein breakfast)", NULL, name, sizeof name))
+        return;
+    memset(&g_draft, 0, sizeof g_draft);
+    ct_strlcpy(g_draft.name, name, sizeof g_draft.name);
+    g_building = true;
+    reset_list(TAB_MEALS);
+    switch_tab(TAB_SEARCH);
+    status("Pick foods with A. Favs and Brands work too");
+}
+
+static void finish_meal(void)
+{
+    if (g_draft.count == 0) {
+        status("Add at least one food first");
+        return;
+    }
+    if (meals_add(&g_meals, &g_draft) != 0) {
+        status("Saved meals are full (%d)", CT_MAX_SAVED_MEALS);
+        return;
+    }
+    meals_save(&g_meals);
+    status("Saved \"%.24s\" with %d foods", g_draft.name, (int)g_draft.count);
+    g_building = false;
+    reset_list(TAB_MEALS);
+    g_sel[TAB_MEALS] = (int)g_meals.count - 1;
+    move_sel(&g_sel[TAB_MEALS], &g_scroll[TAB_MEALS], 0, (int)g_meals.count, visible_rows(TAB_MEALS));
+}
+
+static void log_weight(void)
+{
+    float kg = current_weight();
+    if (!prompt_number("Weight today (kg)", kg > 0 ? kg : 50, &kg) || kg <= 0)
+        return;
+    series_set(&g_weights, g_today, kg);
+    status(series_save(&g_weights, WEIGHTS_FILE) == 0 ? "Weight saved: %.1f kg" : "Could not save (%.1f kg)", kg);
+}
+
+static void edit_target(const char *hint, float *value)
+{
+    float v = *value;
+    if (prompt_number(hint, v, &v)) {
+        *value = v;
+        status(targets_save(&g_targets) == 0 ? "Targets saved" : "Could not save targets");
+    }
+}
+
+static void save_profile(void)
+{
+    status(profile_save(&g_profile) == 0 ? "Profile saved" : "Could not save the profile");
+}
+
+static void edit_profile_row(ProfileRow row)
+{
+    Profile *p = &g_profile;
+    float v;
+    switch (row) {
+    case PR_AGE:
+        v = (float)p->age;
+        if (prompt_number("Age (years)", v, &v) && v < 130) {
+            p->age = (int)(v + 0.5f);
+            save_profile();
+        }
+        break;
+    case PR_SEX:
+        p->sex = p->sex == SEX_MALE ? SEX_FEMALE : SEX_MALE;
+        save_profile();
+        break;
+    case PR_WEIGHT:
+        log_weight();
+        break;
+    case PR_HEIGHT:
+        v = p->height_cm;
+        if (prompt_number("Height (cm)", v > 0 ? v : 160, &v) && v < 260) {
+            p->height_cm = v;
+            save_profile();
+        }
+        break;
+    case PR_BMI:
+        status("BMI is worked out from your weight and height");
+        break;
+    case PR_BODY_FAT:
+        v = p->body_fat;
+        if (prompt_number("Body fat (%), 0 if you don't know", v, &v) && v < 70) {
+            p->body_fat = v;
+            save_profile();
+        }
+        break;
+    case PR_ACTIVITY:
+        p->activity = (Activity)((p->activity + 1) % ACTIVITY_COUNT);
+        save_profile();
+        break;
+    case PR_KCAL: edit_target("Daily calories", &g_targets.kcal); break;
+    case PR_PROTEIN: edit_target("Daily protein (g)", &g_targets.protein); break;
+    case PR_CARBS: edit_target("Daily carbs (g)", &g_targets.carbs); break;
+    case PR_FAT: edit_target("Daily fat (g)", &g_targets.fat); break;
+    default: break;
+    }
+}
+
+static void log_exercise(void)
+{
+    float kcal = series_get(&g_exercise, g_day.date);
+    if (!prompt_number("Exercise calories for this day (0 = none)", kcal, &kcal))
+        return;
+    series_set(&g_exercise, g_day.date, kcal);
+    if (series_save(&g_exercise, EXERCISE_FILE) != 0)
+        status("Could not save exercise");
+    else if (kcal > 0)
+        status("Exercise: %.0f kcal on %s", kcal, g_day.date);
+    else
+        status("No exercise on %s", g_day.date);
+}
+
+static void shift_day(int days)
+{
+    char date[CT_DATE_LEN];
+    if (date_add_days(g_day.date, days, date) == 0)
+        load_day(date);
+}
+
 static void do_action(Action a)
 {
     Tab t = g_tab;
     int count = list_count(t);
     int *sel = &g_sel[t];
-    char date[CT_DATE_LEN];
 
     switch (a) {
     case ACT_NONE:
@@ -540,29 +822,48 @@ static void do_action(Action a)
     case ACT_GO_SEARCH:
         switch_tab(TAB_SEARCH);
         break;
+    case ACT_GO_MEALS:
+        switch_tab(TAB_MEALS);
+        break;
     case ACT_MEAL_PREV:
         g_slot = (Meal)((g_slot + MEAL_COUNT - 1) % MEAL_COUNT);
         break;
     case ACT_MEAL_NEXT:
         g_slot = (Meal)((g_slot + 1) % MEAL_COUNT);
         break;
-    case ACT_PREV_DAY:
-        if (date_add_days(g_day.date, -1, date) == 0) load_day(date);
-        break;
-    case ACT_NEXT_DAY:
-        if (date_add_days(g_day.date, 1, date) == 0) load_day(date);
-        break;
+    case ACT_PREV_DAY: shift_day(-1); break;
+    case ACT_NEXT_DAY: shift_day(1); break;
+    case ACT_PREV_WEEK: shift_day(-WEEK); break;
+    case ACT_NEXT_WEEK: shift_day(WEEK); break;
     case ACT_TODAY:
         load_day(g_today);
-        break;
-    case ACT_TARGETS:
-        edit_targets();
         break;
     case ACT_QUICK:
         quick_entry();
         break;
-    case ACT_SAVE_MEAL:
-        save_as_meal();
+    case ACT_NEW_MEAL:
+        start_meal();
+        break;
+    case ACT_SAVE_DRAFT:
+        finish_meal();
+        break;
+    case ACT_CANCEL_DRAFT:
+        g_building = false;
+        reset_list(TAB_MEALS);
+        status("Meal not saved");
+        break;
+    case ACT_PAGE_PROFILE: g_page = PAGE_PROFILE; break;
+    case ACT_PAGE_REPORT: g_page = PAGE_REPORT; break;
+    case ACT_PAGE_CHARTS: g_page = PAGE_CHARTS; break;
+    case ACT_EDIT_ROW:
+        if (t == TAB_PROFILE && g_page == PAGE_PROFILE)
+            edit_profile_row((ProfileRow)*sel);
+        break;
+    case ACT_LOG_WEIGHT:
+        log_weight();
+        break;
+    case ACT_EXERCISE:
+        log_exercise();
         break;
     case ACT_DELETE:
         if (t == TAB_TODAY && count > 0) {
@@ -571,6 +872,12 @@ static void do_action(Action a)
             day_remove(&g_day, g_order[*sel]);
             save_day();
             if (*sel >= (int)g_day.count) move_sel(sel, &g_scroll[t], -1, (int)g_day.count, visible_rows(t));
+        } else if (t == TAB_MEALS && g_building && count > 0) {
+            status("Took %.30s out", g_draft.items[*sel].food.name);
+            memmove(&g_draft.items[*sel], &g_draft.items[*sel + 1],
+                    (g_draft.count - (size_t)*sel - 1) * sizeof(Entry));
+            g_draft.count--;
+            if (*sel >= (int)g_draft.count) move_sel(sel, &g_scroll[t], -1, (int)g_draft.count, visible_rows(t));
         } else if (t == TAB_MEALS && count > 0) {
             status("Deleted meal \"%.24s\"", g_meals.items[*sel].name);
             meals_remove(&g_meals, (size_t)*sel);
@@ -605,7 +912,7 @@ static void do_action(Action a)
         if (t == TAB_TODAY && count > 0) {
             Entry *e = selected_entry();
             if (e->quick)
-                status("Quick entries can't be favorites. Save it as a meal instead");
+                status("Quick entries can't be favorites. Put it in a meal instead");
             else
                 toggle_star(&e->food, e->grams);
         } else if (t == TAB_SEARCH && count > 0) {
@@ -621,13 +928,13 @@ static void do_action(Action a)
         break;
     case ACT_LOG:
         if (t == TAB_SEARCH && count > 0) {
-            log_food_ask(search_food(*sel));
+            use_food_ask(search_food(*sel));
         } else if (t == TAB_BRANDS && g_brand_open >= 0 && g_brand_count > 0) {
-            log_food_ask(&g_brand_foods[g_brand_sel]);
+            use_food_ask(&g_brand_foods[g_brand_sel]);
         } else if (t == TAB_FAVS && count > 0) {
             Favorite f = g_favs.items[*sel];
-            log_food_grams(&f.food, f.grams);
-        } else if (t == TAB_MEALS && count > 0) {
+            use_food_grams(&f.food, f.grams);
+        } else if (t == TAB_MEALS && !g_building && count > 0) {
             log_saved_meal(&g_meals.items[*sel], 1.0f);
         }
         break;
@@ -635,12 +942,12 @@ static void do_action(Action a)
         if (t == TAB_FAVS && count > 0) {
             Favorite f = g_favs.items[*sel];
             float grams = f.grams;
-            if (prompt_number("Grams eaten", grams, &grams) && grams > 0)
-                log_food_grams(&f.food, grams);
+            if (prompt_number("Grams", grams, &grams) && grams > 0)
+                use_food_grams(&f.food, grams);
         }
         break;
     case ACT_LOG_SCALED:
-        if (t == TAB_MEALS && count > 0) {
+        if (t == TAB_MEALS && !g_building && count > 0) {
             float factor = 1.0f;
             if (prompt_number("How much? 1 = normal, 0.5 = half, 2 = double", factor, &factor) &&
                 factor > 0)
@@ -733,6 +1040,28 @@ static bool handle_keys(u32 down)
         return true;
     }
 
+    /* Profile: Left/Right change page */
+    if (t == TAB_PROFILE) {
+        if (down & KEY_DLEFT) g_page = (Page)((g_page + PAGE_COUNT - 1) % PAGE_COUNT);
+        if (down & KEY_DRIGHT) g_page = (Page)((g_page + 1) % PAGE_COUNT);
+        if (g_page == PAGE_PROFILE) {
+            if (down & KEY_DUP) move_sel(&g_sel[t], &g_scroll[t], -1, PR_COUNT, PR_COUNT);
+            if (down & KEY_DDOWN) move_sel(&g_sel[t], &g_scroll[t], 1, PR_COUNT, PR_COUNT);
+            if (down & KEY_A) do_action(ACT_EDIT_ROW);
+            if (down & KEY_Y) do_action(ACT_LOG_WEIGHT);
+        } else if (g_page == PAGE_REPORT) {
+            if (down & KEY_A) do_action(ACT_EXERCISE);
+            if (down & KEY_Y) do_action(ACT_PREV_DAY);
+            if (down & KEY_X) do_action(ACT_NEXT_DAY);
+            if (down & KEY_B) do_action(ACT_TODAY);
+        } else {
+            if (down & KEY_Y) do_action(ACT_PREV_WEEK);
+            if (down & KEY_X) do_action(ACT_NEXT_WEEK);
+            if (down & KEY_B) do_action(ACT_TODAY);
+        }
+        return true;
+    }
+
     int *sel = (t == TAB_BRANDS) ? &g_brand_sel : &g_sel[t];
     int *scroll = (t == TAB_BRANDS) ? &g_brand_scroll : &g_scroll[t];
     if (down & KEY_DUP) move_sel(sel, scroll, -1, count, visible_rows(t));
@@ -745,12 +1074,23 @@ static bool handle_keys(u32 down)
         if (down & KEY_B) do_action(ACT_TODAY);
         if (down & KEY_X) do_action(ACT_DELETE);
         if (down & KEY_Y) do_action(ACT_EDIT_GRAMS);
-        if (down & KEY_SELECT) do_action(ACT_TARGETS);
+        if (down & KEY_SELECT) switch_tab(TAB_PROFILE);
         return true;
     }
 
-    if (down & KEY_DLEFT) do_action(ACT_MEAL_PREV);
-    if (down & KEY_DRIGHT) do_action(ACT_MEAL_NEXT);
+    if (t == TAB_MEALS && g_building) {
+        if (down & KEY_A) do_action(ACT_SAVE_DRAFT);
+        if (down & KEY_B) do_action(ACT_CANCEL_DRAFT);
+        if (down & KEY_Y) do_action(ACT_GO_SEARCH);
+        if (down & KEY_X) do_action(ACT_DELETE);
+        if (down & KEY_SELECT) do_action(ACT_QUICK);
+        return true;
+    }
+
+    if (!g_building) {
+        if (down & KEY_DLEFT) do_action(ACT_MEAL_PREV);
+        if (down & KEY_DRIGHT) do_action(ACT_MEAL_NEXT);
+    }
     if (down & KEY_A) do_action(ACT_LOG);
     if (down & KEY_B) do_action(ACT_BACK);
     switch (t) {
@@ -770,6 +1110,7 @@ static bool handle_keys(u32 down)
     case TAB_MEALS:
         if (down & KEY_Y) do_action(ACT_LOG_SCALED);
         if (down & KEY_X) do_action(ACT_DELETE);
+        if (down & KEY_SELECT) do_action(ACT_NEW_MEAL);
         break;
     default:
         break;
@@ -781,6 +1122,7 @@ static bool handle_keys(u32 down)
 #define TAB_Y 204.0f
 #define BTN_Y 110.0f
 #define BTN_H 26.0f
+#define SLOT_Y 183.0f
 
 static void layout_buttons(void)
 {
@@ -788,56 +1130,89 @@ static void layout_buttons(void)
     float w3 = (BOT_W - 8 * 4) / 3; /* three per row */
     float x0 = 8, x1 = 8 + w3 + 8, x2 = 8 + 2 * (w3 + 8);
     float r0 = BTN_Y, r1 = BTN_Y + BTN_H + 5;
+    const char *add = g_building ? "A  Add to meal" : "A  Log";
 
     switch (g_tab) {
     case TAB_TODAY:
-        add_button(x0, r0, w3, BTN_H, "Quick add", C_ORANGE, ACT_QUICK);
-        add_button(x1, r0, w3, BTN_H, "Save as meal", C_LIME, ACT_SAVE_MEAL);
-        add_button(x2, r0, w3, BTN_H, "Fav it", C_YELLOW, ACT_STAR);
+        add_button(x0, r0, w3, BTN_H, "Quick add", C_GRAD, ACT_QUICK);
+        add_button(x1, r0, w3, BTN_H, "A  Add food", C_GRAD, ACT_GO_SEARCH);
+        add_button(x2, r0, w3, BTN_H, "Fav it", C_GRAD, ACT_STAR);
         add_button(x0, r1, w3, BTN_H, "< Day", C_PANEL2, ACT_PREV_DAY);
-        add_button(x1, r1, w3, BTN_H, "Targets", C_PANEL2, ACT_TARGETS);
+        add_button(x1, r1, w3, BTN_H, "B  Today", C_PANEL2, ACT_TODAY);
         add_button(x2, r1, w3, BTN_H, "Day >", C_PANEL2, ACT_NEXT_DAY);
         break;
     case TAB_SEARCH:
-        add_button(x0, r0, w3, BTN_H, "Y  Search", C_TEAL, ACT_SEARCH);
-        add_button(x1, r0, w3, BTN_H, "A  Log", C_LIME, ACT_LOG);
-        add_button(x2, r0, w3, BTN_H, "X  Fav", C_YELLOW, ACT_STAR);
+        add_button(x0, r0, w3, BTN_H, "Y  Search", C_GRAD, ACT_SEARCH);
+        add_button(x1, r0, w3, BTN_H, add, C_GRAD, ACT_LOG);
+        add_button(x2, r0, w3, BTN_H, "X  Fav", C_GRAD, ACT_STAR);
         if (g_have_results)
             add_button(x0, r1, w3, BTN_H, "B  Recent", C_PANEL2, ACT_BACK);
         break;
     case TAB_BRANDS:
         if (g_brand_open < 0) {
-            add_button(x0, r0, w3, BTN_H, "Y  Add brand", C_PINK, ACT_ADD_BRAND);
-            add_button(x1, r0, w3, BTN_H, "A  Open", C_LIME, ACT_OPEN_BRAND);
+            add_button(x0, r0, w3, BTN_H, "Y  Add brand", C_GRAD, ACT_ADD_BRAND);
+            add_button(x1, r0, w3, BTN_H, "A  Open", C_GRAD, ACT_OPEN_BRAND);
             add_button(x2, r0, w3, BTN_H, "X  Remove", C_PANEL2, ACT_REMOVE_BRAND);
         } else {
-            add_button(x0, r0, w3, BTN_H, "A  Log", C_LIME, ACT_LOG);
-            add_button(x1, r0, w3, BTN_H, "X  Fav", C_YELLOW, ACT_STAR);
-            add_button(x2, r0, w3, BTN_H, "Y  Refresh", C_PINK, ACT_REFRESH);
+            add_button(x0, r0, w3, BTN_H, add, C_GRAD, ACT_LOG);
+            add_button(x1, r0, w3, BTN_H, "X  Fav", C_GRAD, ACT_STAR);
+            add_button(x2, r0, w3, BTN_H, "Y  Refresh", C_GRAD, ACT_REFRESH);
             add_button(x0, r1, w3, BTN_H, "B  Brands", C_PANEL2, ACT_BACK);
         }
         break;
     case TAB_FAVS:
-        add_button(x0, r0, w3, BTN_H, "A  Log", C_LIME, ACT_LOG);
-        add_button(x1, r0, w3, BTN_H, "Y  Other grams", C_TEAL, ACT_LOG_GRAMS);
+        add_button(x0, r0, w3, BTN_H, add, C_GRAD, ACT_LOG);
+        add_button(x1, r0, w3, BTN_H, "Y  Other grams", C_GRAD, ACT_LOG_GRAMS);
         add_button(x2, r0, w3, BTN_H, "X  Unfav", C_PANEL2, ACT_STAR);
         add_button(x0, r1, w3, BTN_H, "Usual grams", C_PANEL2, ACT_EDIT_GRAMS);
         break;
     case TAB_MEALS:
-        add_button(x0, r0, w3, BTN_H, "A  Log meal", C_LIME, ACT_LOG);
-        add_button(x1, r0, w3, BTN_H, "Y  Half/double", C_TEAL, ACT_LOG_SCALED);
-        add_button(x2, r0, w3, BTN_H, "X  Delete", C_PANEL2, ACT_DELETE);
+        if (g_building) {
+            add_button(x0, r0, w3, BTN_H, "Y  Add foods", C_GRAD, ACT_GO_SEARCH);
+            add_button(x1, r0, w3, BTN_H, "Quick item", C_GRAD, ACT_QUICK);
+            add_button(x2, r0, w3, BTN_H, "X  Take out", C_PANEL2, ACT_DELETE);
+            add_button(x0, r1, w3, BTN_H, "A  Save meal", C_GRAD, ACT_SAVE_DRAFT);
+            add_button(x1, r1, w3, BTN_H, "B  Cancel", C_PANEL2, ACT_CANCEL_DRAFT);
+        } else {
+            add_button(x0, r0, w3, BTN_H, "+ New meal", C_GRAD, ACT_NEW_MEAL);
+            add_button(x1, r0, w3, BTN_H, "A  Log meal", C_GRAD, ACT_LOG);
+            add_button(x2, r0, w3, BTN_H, "Y  Half/double", C_GRAD, ACT_LOG_SCALED);
+            add_button(x0, r1, w3, BTN_H, "X  Delete", C_PANEL2, ACT_DELETE);
+        }
         break;
+    case TAB_PROFILE: {
+        static const Action pages[PAGE_COUNT] = {ACT_PAGE_PROFILE, ACT_PAGE_REPORT, ACT_PAGE_CHARTS};
+        float xs[3] = {x0, x1, x2};
+        for (int i = 0; i < PAGE_COUNT; i++)
+            add_button(xs[i], r0, w3, BTN_H, PAGE_NAMES[i], i == (int)g_page ? C_GRAD : C_PANEL2, pages[i]);
+        if (g_page == PAGE_PROFILE) {
+            add_button(x0, r1, w3, BTN_H, "A  Change", C_GRAD, ACT_EDIT_ROW);
+            add_button(x1, r1, w3, BTN_H, "Y  Log weight", C_GRAD, ACT_LOG_WEIGHT);
+        } else if (g_page == PAGE_REPORT) {
+            add_button(x0, r1, w3, BTN_H, "Y  < Day", C_PANEL2, ACT_PREV_DAY);
+            add_button(x1, r1, w3, BTN_H, "A  Exercise", C_GRAD, ACT_EXERCISE);
+            add_button(x2, r1, w3, BTN_H, "X  Day >", C_PANEL2, ACT_NEXT_DAY);
+        } else {
+            add_button(x0, r1, w3, BTN_H, "Y  < Week", C_PANEL2, ACT_PREV_WEEK);
+            add_button(x1, r1, w3, BTN_H, "B  This week", C_PANEL2, ACT_TODAY);
+            add_button(x2, r1, w3, BTN_H, "X  Week >", C_PANEL2, ACT_NEXT_WEEK);
+        }
+        break;
+    }
     default:
         break;
     }
 }
 
-/* Meal slot picker row, on every tab that logs food. */
-#define SLOT_Y 183.0f
+/* What sits in the row above the tab bar. */
 static bool slot_row_visible(void)
 {
-    return !(g_tab == TAB_BRANDS && g_brand_open < 0);
+    return !g_building && g_tab != TAB_PROFILE && !(g_tab == TAB_BRANDS && g_brand_open < 0);
+}
+
+static bool build_strip_visible(void)
+{
+    return g_building && g_tab != TAB_PROFILE;
 }
 
 static void handle_touch(void)
@@ -852,10 +1227,16 @@ static void handle_touch(void)
             switch_tab((Tab)t);
         return;
     }
-    if (slot_row_visible() && y >= SLOT_Y - 2 && y < SLOT_Y + 18) {
-        if (x < 60) do_action(ACT_MEAL_PREV);
-        else if (x > BOT_W - 60) do_action(ACT_MEAL_NEXT);
-        return;
+    if (y >= SLOT_Y - 2 && y < SLOT_Y + 18) {
+        if (slot_row_visible()) {
+            if (x < 60) do_action(ACT_MEAL_PREV);
+            else if (x > BOT_W - 60) do_action(ACT_MEAL_NEXT);
+            return;
+        }
+        if (build_strip_visible()) {
+            do_action(ACT_GO_MEALS);
+            return;
+        }
     }
     for (int i = 0; i < g_button_count; i++) {
         Button *b = &g_buttons[i];
@@ -867,15 +1248,17 @@ static void handle_touch(void)
 }
 
 /* ---- top screen --------------------------------------------------------- */
-static void header(const char *title, u32 color)
+static void header(const char *title, const char *right)
 {
-    C2D_DrawRectSolid(0, 0, 0.4f, TOP_W, 22, color);
+    grad_rect(0, 0, TOP_W, 22, 0, 1);
     text(10, 3, 0.55f, C_INK, 0, "%s", title);
+    if (right)
+        text(TOP_W - 10, 4, 0.45f, C_INK, C2D_AlignRight, "%s", right);
 }
 
 static void fav_dot(float x, float y)
 {
-    C2D_DrawCircleSolid(x, y, 0.5f, 3.5f, C_YELLOW);
+    C2D_DrawCircleSolid(x, y, 0.5f, 3.5f, C_MINT);
 }
 
 /* One list row: name (and brand) on the left, a value on the right. */
@@ -904,12 +1287,7 @@ static void scroll_hint(float y, int scroll, int rows, int count)
 
 static u32 meal_color(Meal m)
 {
-    switch (m) {
-    case MEAL_BREAKFAST: return C_YELLOW;
-    case MEAL_LUNCH: return C_TEAL;
-    case MEAL_DINNER: return C_PINK;
-    default: return C_LIME;
-    }
+    return grad((float)m / (MEAL_COUNT - 1));
 }
 
 static void draw_top_today(void)
@@ -917,10 +1295,11 @@ static void draw_top_today(void)
     Totals t = sum_entries(g_day.entries, g_day.count, -1);
     bool is_today = strcmp(g_day.date, g_today) == 0;
     C2D_DrawRectSolid(0, 0, 0.4f, TOP_W, 70, C_PANEL);
+    grad_rect(0, 68, TOP_W, 2, 0, 1);
     text(10, 6, 0.6f, C_TEXT, 0, "%s%s", g_day.date, is_today ? "  (today)" : "");
-    text(TOP_W - 10, 6, 0.6f, t.kcal > g_targets.kcal ? C_RED : C_LIME, C2D_AlignRight,
+    text(TOP_W - 10, 6, 0.6f, t.kcal > g_targets.kcal ? C_WARN : C_TURQ, C2D_AlignRight,
          "%.0f / %.0f kcal", t.kcal, g_targets.kcal);
-    bar(10, 28, TOP_W - 20, 9, t.kcal, g_targets.kcal, C_LIME);
+    bar(10, 28, TOP_W - 20, 9, t.kcal, g_targets.kcal, C_GRAD);
 
     float col = (TOP_W - 20) / 3.0f;
     text(10, 41, 0.45f, C_TEXT, 0, "Protein %.0f/%.0f g", t.protein, g_targets.protein);
@@ -933,7 +1312,7 @@ static void draw_top_today(void)
     float y = 76;
     if (g_day.count == 0) {
         rrect(40, y + 30, TOP_W - 80, 60, 12, C_PANEL);
-        text(TOP_W / 2, y + 40, 0.6f, C_YELLOW, C2D_AlignCenter, "Nothing logged yet!");
+        text(TOP_W / 2, y + 40, 0.6f, C_TURQ, C2D_AlignCenter, "Nothing logged yet!");
         text(TOP_W / 2, y + 62, 0.45f, C_MUTED, C2D_AlignCenter, "A to search, or tap Quick add");
         return;
     }
@@ -969,59 +1348,66 @@ static void draw_food_list(const Food *foods, int count, int sel, int scroll, fl
     scroll_hint(y0 + rows * ROW_H + 1, scroll, rows, count);
 }
 
-static void empty_card(const char *title, const char *hint, u32 color)
+static void empty_card(const char *title, const char *hint)
 {
     rrect(40, 80, TOP_W - 80, 64, 12, C_PANEL);
-    text(TOP_W / 2, 90, 0.6f, color, C2D_AlignCenter, "%s", title);
-    text(TOP_W / 2, 114, 0.45f, C_MUTED, C2D_AlignCenter, "%s", hint);
+    grad_rect(52, 80, TOP_W - 104, 3, 0, 1);
+    text(TOP_W / 2, 92, 0.6f, C_TURQ, C2D_AlignCenter, "%s", title);
+    text(TOP_W / 2, 116, 0.45f, C_MUTED, C2D_AlignCenter, "%s", hint);
+}
+
+/* Header text while building a meal, so it shows on every tab. */
+static const char *building_note(void)
+{
+    static char note[48];
+    snprintf(note, sizeof note, "Meal: %.16s (%d)", g_draft.name, (int)g_draft.count);
+    return g_building ? note : NULL;
 }
 
 static void draw_top_search(void)
 {
     char title[96];
     if (g_have_results)
-        snprintf(title, sizeof title, "Search: %.40s", g_query);
+        snprintf(title, sizeof title, "Search: %.28s", g_query);
     else
         snprintf(title, sizeof title, "Search  -  recent foods");
-    header(title, C_TEAL);
+    header(title, building_note());
     if (g_pending == PEND_SEARCH) {
-        empty_card("Searching...", "Asking Open Food Facts", C_TEAL);
+        empty_card("Searching...", "Asking Open Food Facts");
         return;
     }
     int count = list_count(TAB_SEARCH);
     if (count == 0) {
-        empty_card(g_have_results ? "No results" : "Find a food", "Press Y to search online", C_TEAL);
+        empty_card(g_have_results ? "No results" : "Find a food", "Press Y to search online");
         return;
     }
     draw_food_list(g_have_results ? g_results : g_cache.items, count, g_sel[TAB_SEARCH],
-                   g_scroll[TAB_SEARCH], 28, C_TEAL);
+                   g_scroll[TAB_SEARCH], 28, C_GREEN);
 }
 
 static void draw_top_brands(void)
 {
     if (g_brand_open >= 0) {
         char title[64];
-        snprintf(title, sizeof title, "Brands  >  %.30s", g_brands.names[g_brand_open]);
-        header(title, C_PINK);
+        snprintf(title, sizeof title, "Brands  >  %.24s", g_brands.names[g_brand_open]);
+        header(title, building_note());
         if (g_pending == PEND_BRAND) {
-            empty_card("Loading products...", "Asking Open Food Facts", C_PINK);
+            empty_card("Loading products...", "Asking Open Food Facts");
             return;
         }
         if (g_brand_count == 0) {
-            empty_card("No products yet", "Press Y to refresh", C_PINK);
+            empty_card("No products yet", "Press Y to refresh");
             return;
         }
-        draw_food_list(g_brand_foods, g_brand_count, g_brand_sel, g_brand_scroll, 28, C_PINK);
+        draw_food_list(g_brand_foods, g_brand_count, g_brand_sel, g_brand_scroll, 28, C_TURQ);
         return;
     }
 
-    header("My Brands", C_PINK);
+    header("My Brands", building_note());
     if (g_brands.count == 0) {
-        empty_card("Follow your favorite brands", "Press Y to add one, like Quest or Barebells", C_PINK);
+        empty_card("Follow your favorite brands", "Press Y to add one, like Quest or Barebells");
         return;
     }
-    static const int ncolors = 6;
-    u32 colors[6] = {C_PINK, C_ORANGE, C_YELLOW, C_TEAL, C_LIME, C_BLUE};
     float tw = (TOP_W - 16 - 2 * 8) / 3, th = 30;
     int sel = g_sel[TAB_BRANDS];
     /* scroll by rows of 3 so the selected tile stays on screen (6 rows fit) */
@@ -1029,20 +1415,19 @@ static void draw_top_brands(void)
     for (int i = first_row * 3; i < (int)g_brands.count && i < (first_row + 6) * 3; i++) {
         int r = i / 3 - first_row, c = i % 3;
         float x = 8 + c * (tw + 8), y = 30 + r * (th + 4);
-        u32 col = colors[i % ncolors];
-        if (i == sel) {
+        if (i == sel)
             rrect(x - 2, y - 2, tw + 4, th + 4, 10, C_TEXT);
-        }
-        rrect(x, y, tw, th, 9, col);
+        /* the tiles in a row form one continuous gradient */
+        rrect_grad(x, y, tw, th, 9, x / TOP_W, (x + tw) / TOP_W);
         text(x + tw / 2, y + 7, 0.55f, C_INK, C2D_AlignCenter, "%.16s", g_brands.names[i]);
     }
 }
 
 static void draw_top_favs(void)
 {
-    header("Favorites", C_YELLOW);
+    header("Favorites", building_note());
     if (g_favs.count == 0) {
-        empty_card("No favorites yet", "Press X on any food to make it a favorite", C_YELLOW);
+        empty_card("No favorites yet", "Press X on any food to make it a favorite");
         return;
     }
     int rows = visible_rows(TAB_FAVS);
@@ -1056,7 +1441,7 @@ static void draw_top_favs(void)
         char right[32];
         snprintf(right, sizeof right, "%.0f g  %.0f kcal", f->grams, entry_totals(&e).kcal);
         food_row(28 + row * ROW_H, idx == g_sel[TAB_FAVS], f->food.name, f->food.brand, true, right,
-                 C_YELLOW);
+                 C_TURQ);
     }
     scroll_hint(28 + rows * ROW_H + 1, g_scroll[TAB_FAVS], rows, (int)g_favs.count);
 }
@@ -1066,11 +1451,44 @@ static Totals meal_totals(const SavedMeal *m)
     return sum_entries(m->items, m->count, -1);
 }
 
+static void entry_right(const Entry *e, char *out, size_t size)
+{
+    if (e->quick)
+        snprintf(out, size, "quick  %.0f kcal", entry_totals(e).kcal);
+    else
+        snprintf(out, size, "%.0f g  %.0f kcal", e->grams, entry_totals(e).kcal);
+}
+
 static void draw_top_meals(void)
 {
-    header("Saved meals", C_LIME);
+    if (g_building) {
+        char title[96], right[32];
+        Totals t = meal_totals(&g_draft);
+        snprintf(title, sizeof title, "New meal: %.30s", g_draft.name);
+        snprintf(right, sizeof right, "%.0f kcal", t.kcal);
+        header(title, right);
+        text(10, 26, 0.42f, C_MUTED, 0, "P %.0f g   C %.0f g   F %.0f g   -   %d foods", t.protein, t.carbs,
+             t.fat, (int)g_draft.count);
+        if (g_draft.count == 0) {
+            empty_card("Add foods to your meal", "Y opens Search. Favs and Brands work too");
+            return;
+        }
+        int rows = visible_rows(TAB_MEALS);
+        for (int row = 0; row < rows && g_scroll[TAB_MEALS] + row < (int)g_draft.count; row++) {
+            int idx = g_scroll[TAB_MEALS] + row;
+            const Entry *e = &g_draft.items[idx];
+            char r[40];
+            entry_right(e, r, sizeof r);
+            food_row(42 + row * ROW_H, idx == g_sel[TAB_MEALS], e->food.name, e->quick ? "" : e->food.brand,
+                     false, r, C_GREEN);
+        }
+        scroll_hint(42 + rows * ROW_H + 1, g_scroll[TAB_MEALS], rows, (int)g_draft.count);
+        return;
+    }
+
+    header("Saved meals", NULL);
     if (g_meals.count == 0) {
-        empty_card("No saved meals yet", "On Today, select a food and tap Save as meal", C_LIME);
+        empty_card("No saved meals yet", "Tap + New meal, then pick foods like in Search");
         return;
     }
     int rows = visible_rows(TAB_MEALS);
@@ -1080,15 +1498,277 @@ static void draw_top_meals(void)
         char right[32], items[16];
         snprintf(right, sizeof right, "%.0f kcal", meal_totals(m).kcal);
         snprintf(items, sizeof items, "%d foods", (int)m->count);
-        food_row(28 + row * ROW_H, idx == g_sel[TAB_MEALS], m->name, items, false, right, C_LIME);
+        food_row(28 + row * ROW_H, idx == g_sel[TAB_MEALS], m->name, items, false, right, C_GREEN);
     }
     scroll_hint(28 + rows * ROW_H + 1, g_scroll[TAB_MEALS], rows, (int)g_meals.count);
 }
 
+/* ---- profile, report, charts ------------------------------------------- */
+static const char *ROW_LABELS[PR_COUNT] = {"Age", "Sex", "Weight", "Height", "BMI", "Body fat",
+                                           "Activity", "Calories", "Protein", "Carbs", "Fat"};
+
+static float profile_row_y(int row)
+{
+    return 28 + row * 16 + (row >= PR_KCAL ? 16 : 0);
+}
+
+static void profile_value(ProfileRow row, char *out, size_t size)
+{
+    const Profile *p = &g_profile;
+    float kg = current_weight();
+    switch (row) {
+    case PR_AGE:
+        if (p->age > 0) snprintf(out, size, "%d years", p->age);
+        else snprintf(out, size, "not set");
+        break;
+    case PR_SEX: snprintf(out, size, "%s", p->sex == SEX_MALE ? "Male" : "Female"); break;
+    case PR_WEIGHT:
+        if (kg > 0) snprintf(out, size, "%.1f kg", kg);
+        else snprintf(out, size, "not logged yet");
+        break;
+    case PR_HEIGHT:
+        if (p->height_cm > 0) snprintf(out, size, "%.0f cm", p->height_cm);
+        else snprintf(out, size, "not set");
+        break;
+    case PR_BMI: {
+        float b = bmi(kg, p->height_cm);
+        if (b > 0) snprintf(out, size, "%.1f", b);
+        else snprintf(out, size, "needs weight and height");
+        break;
+    }
+    case PR_BODY_FAT:
+        if (p->body_fat > 0) snprintf(out, size, "%.0f %%", p->body_fat);
+        else snprintf(out, size, "not set");
+        break;
+    case PR_ACTIVITY: snprintf(out, size, "%s", activity_name(p->activity)); break;
+    case PR_KCAL: snprintf(out, size, "%.0f kcal", g_targets.kcal); break;
+    case PR_PROTEIN: snprintf(out, size, "%.0f g", g_targets.protein); break;
+    case PR_CARBS: snprintf(out, size, "%.0f g", g_targets.carbs); break;
+    case PR_FAT: snprintf(out, size, "%.0f g", g_targets.fat); break;
+    default: out[0] = '\0'; break;
+    }
+}
+
+static void draw_page_profile(void)
+{
+    header("Profile", "< Report  Charts >");
+    text(TOP_W - 10, profile_row_y(PR_KCAL) - 15, 0.42f, C_MUTED, C2D_AlignRight, "Daily targets");
+    for (int row = 0; row < PR_COUNT; row++) {
+        float y = profile_row_y(row);
+        bool on = row == g_sel[TAB_PROFILE];
+        if (on) {
+            rrect(4, y - 1, TOP_W - 8, ROW_H + 1, 5, C_PANEL2);
+            C2D_DrawRectSolid(4, y - 1, 0.45f, 3, ROW_H + 1, grad((float)row / (PR_COUNT - 1)));
+        }
+        char value[48];
+        profile_value((ProfileRow)row, value, sizeof value);
+        text(16, y, TEXT_SCALE, C_MUTED, 0, "%s", ROW_LABELS[row]);
+        text(TOP_W - 12, y, TEXT_SCALE, row == PR_BMI ? C_MUTED : C_TEXT, C2D_AlignRight, "%s", value);
+    }
+    grad_rect(16, profile_row_y(PR_KCAL) - 4, 120, 2, 0, 1);
+}
+
+static void draw_page_report(void)
+{
+    char title[48];
+    snprintf(title, sizeof title, "Report  -  %s", g_day.date);
+    header(title, "< >");
+    float kg = series_latest(&g_weights, g_day.date);
+    if (kg <= 0)
+        kg = current_weight();
+    float rest = bmr(&g_profile, kg);
+    if (rest <= 0) {
+        empty_card("Fill in your profile first", "Age, height and a weight are needed");
+        return;
+    }
+    Totals t = sum_entries(g_day.entries, g_day.count, -1);
+    float basic = rest * (activity_factor(g_profile.activity) - 1.0f);
+    float exercise = series_get(&g_exercise, g_day.date);
+    float burned = rest + basic + exercise;
+
+    /* two big numbers */
+    float cw = (TOP_W - 30) / 2;
+    rrect(10, 30, cw, 50, 10, C_PANEL);
+    rrect(20 + cw, 30, cw, 50, 10, C_PANEL);
+    grad_rect(10 + 10, 30, cw - 20, 3, 0, 0.5f);
+    grad_rect(20 + cw + 10, 30, cw - 20, 3, 0.5f, 1);
+    text(10 + cw / 2, 37, 0.45f, C_MUTED, C2D_AlignCenter, "Eaten");
+    text(10 + cw / 2, 52, 0.75f, C_GREEN, C2D_AlignCenter, "%.0f kcal", t.kcal);
+    text(20 + cw * 1.5f, 37, 0.45f, C_MUTED, C2D_AlignCenter, "Burned");
+    text(20 + cw * 1.5f, 52, 0.75f, C_BLUE, C2D_AlignCenter, "%.0f kcal", burned);
+
+    /* side by side bars on one scale */
+    float top = t.kcal > burned ? t.kcal : burned;
+    if (top <= 0) top = 1;
+    text(10, 88, 0.42f, C_MUTED, 0, "Eaten");
+    bar(70, 91, TOP_W - 80, 8, t.kcal, top, C_GREEN);
+    text(10, 102, 0.42f, C_MUTED, 0, "Burned");
+    bar(70, 105, TOP_W - 80, 8, burned, top, C_BLUE);
+
+    /* what makes up "burned" */
+    float y = 122;
+    text(10, y, 0.48f, C_TEXT, 0, "Burned");
+    y += 16;
+    text(20, y, 0.45f, C_MUTED, 0, "Resting (BMR)");
+    text(TOP_W - 12, y, 0.45f, C_TEXT, C2D_AlignRight, "%.0f kcal", rest);
+    y += 14;
+    text(20, y, 0.45f, C_MUTED, 0, "Basic activity (%s)", activity_name(g_profile.activity));
+    text(TOP_W - 12, y, 0.45f, C_TEXT, C2D_AlignRight, "%.0f kcal", basic);
+    y += 14;
+    text(20, y, 0.45f, C_MUTED, 0, "Exercise");
+    text(TOP_W - 12, y, 0.45f, C_TEXT, C2D_AlignRight, "%.0f kcal", exercise);
+
+    /* where the eaten energy came from */
+    y += 20;
+    float pk = t.protein * 4, ck = t.carbs * 4, fk = t.fat * 9, sum = pk + ck + fk;
+    text(10, y, 0.48f, C_TEXT, 0, "Eaten");
+    if (sum > 0) {
+        y += 17;
+        float w = TOP_W - 20, x = 10;
+        float parts[3] = {pk, ck, fk};
+        u32 cols[3] = {C_PROTEIN, C_CARBS, C_FAT};
+        for (int i = 0; i < 3; i++) {
+            float pw = w * parts[i] / sum;
+            if (pw > 0) C2D_DrawRectSolid(x, y, 0.4f, pw, 8, cols[i]);
+            x += pw;
+        }
+        y += 11;
+        text(10, y, 0.42f, C_MUTED, 0, "Protein %.0f%%   Carbs %.0f%%   Fat %.0f%%", pk / sum * 100,
+             ck / sum * 100, fk / sum * 100);
+    } else {
+        text(TOP_W - 12, y, 0.45f, C_MUTED, C2D_AlignRight, "nothing logged");
+    }
+}
+
+static void day_number(const char *date, char *out, size_t size)
+{
+    /* "YYYY-MM-DD" -> "DD" */
+    snprintf(out, size, "%.2s", strlen(date) >= 10 ? date + 8 : "?");
+}
+
+static void draw_page_charts(void)
+{
+    if (g_week_dirty)
+        compute_week();
+    char title[48];
+    snprintf(title, sizeof title, "Charts  -  week to %s", g_day.date);
+    header(title, "< >");
+
+    /* calories per day, split by macro */
+    text(10, 25, 0.45f, C_TEXT, 0, "Calories");
+    float lx = TOP_W - 150;
+    const char *names[3] = {"Protein", "Carbs", "Fat"};
+    u32 cols[3] = {C_PROTEIN, C_CARBS, C_FAT};
+    for (int i = 0; i < 3; i++) {
+        C2D_DrawRectSolid(lx + i * 50, 30, 0.4f, 7, 7, cols[i]);
+        text(lx + i * 50 + 10, 26, 0.4f, C_MUTED, 0, "%s", names[i]);
+    }
+    float x0 = 36, y_top = 44, y_base = 118, w = TOP_W - x0 - 10;
+    float scale = g_targets.kcal;
+    for (int i = 0; i < WEEK; i++)
+        if (g_week[i].kcal > scale) scale = g_week[i].kcal;
+    scale *= 1.1f;
+    if (scale <= 0) scale = 1;
+    C2D_DrawRectSolid(x0, y_base, 0.4f, w, 1, C_BAR_BG);
+    /* target line */
+    float ty = y_base - (y_base - y_top) * g_targets.kcal / scale;
+    for (float x = x0; x < x0 + w; x += 8)
+        C2D_DrawRectSolid(x, ty, 0.45f, 4, 1, C_MUTED);
+    text(x0 - 4, ty - 6, 0.35f, C_MUTED, C2D_AlignRight, "%.0f", g_targets.kcal);
+    float slot = w / WEEK, bw = slot * 0.55f;
+    for (int i = 0; i < WEEK; i++) {
+        const Totals *d = &g_week[i];
+        float bx = x0 + i * slot + (slot - bw) / 2;
+        float h = (y_base - y_top) * d->kcal / scale;
+        float pk = d->protein * 4, ck = d->carbs * 4, fk = d->fat * 9, sum = pk + ck + fk;
+        if (h > 0 && sum > 0) {
+            float parts[3] = {pk, ck, fk};
+            float y = y_base;
+            for (int k = 0; k < 3; k++) {
+                float ph = h * parts[k] / sum;
+                C2D_DrawRectSolid(bx, y - ph, 0.4f, bw, ph, cols[k]);
+                y -= ph;
+            }
+        } else if (h > 0) {
+            C2D_DrawRectSolid(bx, y_base - h, 0.4f, bw, h, C_TURQ);
+        }
+        if (d->kcal > 0)
+            text(bx + bw / 2, y_base - h - 10, 0.35f, C_TEXT, C2D_AlignCenter, "%.0f", d->kcal);
+        char dn[4];
+        day_number(g_week_dates[i], dn, sizeof dn);
+        bool cur = i == WEEK - 1;
+        text(bx + bw / 2, y_base + 2, 0.4f, cur ? C_TURQ : C_MUTED, C2D_AlignCenter, "%s", dn);
+    }
+
+    /* weight line */
+    text(10, 136, 0.45f, C_TEXT, 0, "Weight (kg)");
+    int last = -1;
+    for (int i = (int)g_weights.count - 1; i >= 0; i--)
+        if (strcmp(g_weights.items[i].date, g_day.date) <= 0) {
+            last = i;
+            break;
+        }
+    if (last < 0) {
+        text(TOP_W / 2, 175, 0.45f, C_MUTED, C2D_AlignCenter, "Log your weight on the Profile page (Y)");
+        return;
+    }
+    int first = last - 9 < 0 ? 0 : last - 9; /* up to 10 points */
+    float lo = g_weights.items[last].value, hi = lo;
+    for (int i = first; i <= last; i++) {
+        float v = g_weights.items[i].value;
+        if (v < lo) lo = v;
+        if (v > hi) hi = v;
+    }
+    lo -= 0.5f;
+    hi += 0.5f;
+    float gx0 = 36, gx1 = TOP_W - 24, gy0 = 156, gy1 = 220;
+    C2D_DrawRectSolid(gx0, gy1, 0.4f, gx1 - gx0, 1, C_BAR_BG);
+    text(gx0 - 4, gy0 - 6, 0.35f, C_MUTED, C2D_AlignRight, "%.1f", hi);
+    text(gx0 - 4, gy1 - 6, 0.35f, C_MUTED, C2D_AlignRight, "%.1f", lo);
+    int n = last - first + 1;
+    float px = 0, py = 0;
+    for (int i = 0; i < n; i++) {
+        const SeriesPoint *p = &g_weights.items[first + i];
+        float tx = n == 1 ? 0.5f : (float)i / (n - 1);
+        float x = gx0 + (gx1 - gx0) * tx;
+        float y = gy1 - (gy1 - gy0) * (p->value - lo) / (hi - lo);
+        if (i > 0)
+            C2D_DrawLine(px, py, grad(tx - 1.0f / (n > 1 ? n - 1 : 1)), x, y, grad(tx), 2.5f, 0.45f);
+        px = x;
+        py = y;
+    }
+    for (int i = 0; i < n; i++) {
+        const SeriesPoint *p = &g_weights.items[first + i];
+        float tx = n == 1 ? 0.5f : (float)i / (n - 1);
+        float x = gx0 + (gx1 - gx0) * tx;
+        float y = gy1 - (gy1 - gy0) * (p->value - lo) / (hi - lo);
+        C2D_DrawCircleSolid(x, y, 0.5f, 3.5f, grad(tx));
+        if (i == 0 || i == n - 1) {
+            text(x, y - 15, 0.38f, C_TEXT, C2D_AlignCenter, "%.1f", p->value);
+            text(x, gy1 + 3, 0.35f, C_MUTED, C2D_AlignCenter, "%.5s", p->date + 5);
+        }
+    }
+}
+
+static void draw_top_profile(void)
+{
+    switch (g_page) {
+    case PAGE_PROFILE: draw_page_profile(); break;
+    case PAGE_REPORT: draw_page_report(); break;
+    default: draw_page_charts(); break;
+    }
+}
+
 /* ---- bottom screen ------------------------------------------------------ */
-static void food_card(const Food *f, float grams, bool quick)
+static void card_bg(void)
 {
     rrect(6, 6, BOT_W - 12, 98, 10, C_PANEL);
+    grad_rect(18, 6, BOT_W - 36, 3, 0, 1);
+}
+
+static void food_card(const Food *f, float grams, bool quick)
+{
+    card_bg();
     text(14, 12, 0.55f, C_TEXT, 0, "%.34s", f->name);
     if (!quick && f->brand[0])
         text(14, 29, 0.45f, C_MUTED, 0, "%.40s", f->brand);
@@ -1098,28 +1778,27 @@ static void food_card(const Food *f, float grams, bool quick)
     e.grams = quick ? 100 : (grams > 0 ? grams : 100);
     Totals t = entry_totals(&e);
     if (quick)
-        text(14, 47, 0.5f, C_YELLOW, 0, "%.0f kcal", t.kcal);
+        text(14, 47, 0.5f, C_TURQ, 0, "%.0f kcal", t.kcal);
     else
-        text(14, 47, 0.5f, C_YELLOW, 0, "%.0f kcal in %.0f g", t.kcal, e.grams);
+        text(14, 47, 0.5f, C_TURQ, 0, "%.0f kcal in %.0f g", t.kcal, e.grams);
 
-    /* three macro chips */
+    /* three macro chips, green -> turquoise -> blue */
     float cw = (BOT_W - 12 - 16 - 16) / 3;
     const char *names[3] = {"Protein", "Carbs", "Fat"};
     float vals[3] = {t.protein, t.carbs, t.fat};
-    u32 cols[3] = {C_PROTEIN, C_CARBS, C_FAT};
     for (int i = 0; i < 3; i++) {
         float x = 14 + i * (cw + 8);
-        rrect(x, 70, cw, 26, 8, cols[i]);
+        rrect_grad(x, 70, cw, 26, 8, x / BOT_W, (x + cw) / BOT_W);
         text(x + cw / 2, 75, 0.45f, C_INK, C2D_AlignCenter, "%s %.1f g", names[i], vals[i]);
     }
 }
 
 static void meal_card(const SavedMeal *m)
 {
-    rrect(6, 6, BOT_W - 12, 98, 10, C_PANEL);
+    card_bg();
     Totals t = meal_totals(m);
     text(14, 12, 0.55f, C_TEXT, 0, "%.34s", m->name);
-    text(BOT_W - 14, 12, 0.5f, C_YELLOW, C2D_AlignRight, "%.0f kcal", t.kcal);
+    text(BOT_W - 14, 12, 0.5f, C_TURQ, C2D_AlignRight, "%.0f kcal", t.kcal);
     text(14, 29, 0.42f, C_MUTED, 0, "P %.0f g   C %.0f g   F %.0f g", t.protein, t.carbs, t.fat);
     for (size_t i = 0; i < m->count && i < 4; i++)
         text(14, 46 + i * 13, 0.42f, C_TEXT, 0, "- %.40s", m->items[i].food.name);
@@ -1129,9 +1808,56 @@ static void meal_card(const SavedMeal *m)
 
 static void hint_card(const char *line1, const char *line2)
 {
-    rrect(6, 6, BOT_W - 12, 98, 10, C_PANEL);
+    card_bg();
     text(BOT_W / 2, 36, 0.5f, C_TEXT, C2D_AlignCenter, "%s", line1);
     text(BOT_W / 2, 58, 0.42f, C_MUTED, C2D_AlignCenter, "%s", line2);
+}
+
+static const char *ROW_HELP[PR_COUNT] = {
+    "Used for your resting energy (BMR)",
+    "A switches between Male and Female",
+    "A or Y logs today's weight",
+    "In centimeters",
+    "Worked out from weight and height",
+    "Optional, in percent",
+    "A cycles: how active a normal day is",
+    "Your daily calorie goal",
+    "Your daily protein goal",
+    "Your daily carbs goal",
+    "Your daily fat goal",
+};
+
+static void draw_profile_details(void)
+{
+    if (g_page == PAGE_PROFILE) {
+        int row = g_sel[TAB_PROFILE];
+        hint_card(ROW_LABELS[row], ROW_HELP[row]);
+    } else if (g_page == PAGE_REPORT) {
+        hint_card("Eaten vs burned", "Burned = resting + basic activity + exercise");
+    } else {
+        if (g_week_dirty)
+            compute_week();
+        Totals avg;
+        memset(&avg, 0, sizeof avg);
+        int days = 0;
+        for (int i = 0; i < WEEK; i++) {
+            if (g_week[i].kcal <= 0) continue;
+            avg.kcal += g_week[i].kcal;
+            avg.protein += g_week[i].protein;
+            avg.carbs += g_week[i].carbs;
+            avg.fat += g_week[i].fat;
+            days++;
+        }
+        card_bg();
+        text(BOT_W / 2, 18, 0.5f, C_TEXT, C2D_AlignCenter, "Average of logged days (%d)", days);
+        if (days > 0) {
+            text(BOT_W / 2, 40, 0.7f, C_TURQ, C2D_AlignCenter, "%.0f kcal", avg.kcal / days);
+            text(BOT_W / 2, 70, 0.45f, C_MUTED, C2D_AlignCenter, "Protein %.0f g   Carbs %.0f g   Fat %.0f g",
+                 avg.protein / days, avg.carbs / days, avg.fat / days);
+        } else {
+            text(BOT_W / 2, 50, 0.45f, C_MUTED, C2D_AlignCenter, "Nothing logged this week");
+        }
+    }
 }
 
 static void draw_details(void)
@@ -1167,9 +1893,22 @@ static void draw_details(void)
         if (count > 0) food_card(&g_favs.items[g_sel[t]].food, g_favs.items[g_sel[t]].grams, false);
         else hint_card("Favorites log in one tap", "Press X on a food to add it here");
         break;
+    case TAB_MEALS:
+        if (g_building) {
+            if (count > 0) {
+                const Entry *e = &g_draft.items[g_sel[t]];
+                food_card(&e->food, e->grams, e->quick);
+            } else {
+                hint_card("Building a meal", "Y opens Search. A on a food adds it here");
+            }
+        } else if (count > 0) {
+            meal_card(&g_meals.items[g_sel[t]]);
+        } else {
+            hint_card("Meals log several foods at once", "Tap + New meal to make one");
+        }
+        break;
     default:
-        if (count > 0) meal_card(&g_meals.items[g_sel[t]]);
-        else hint_card("Meals log several foods at once", "Save one from the Today tab");
+        draw_profile_details();
         break;
     }
 }
@@ -1180,22 +1919,31 @@ static void draw_bottom(void)
 
     for (int i = 0; i < g_button_count; i++) {
         Button *b = &g_buttons[i];
-        rrect(b->x, b->y, b->w, b->h, 9, b->color);
-        u32 ink = (b->color == C_PANEL2) ? C_TEXT : C_INK;
-        text(b->x + b->w / 2, b->y + 6, 0.45f, ink, C2D_AlignCenter, "%s", b->label);
+        bool g = b->color == C_GRAD;
+        if (g)
+            rrect_grad(b->x, b->y, b->w, b->h, 9, b->x / BOT_W, (b->x + b->w) / BOT_W);
+        else
+            rrect(b->x, b->y, b->w, b->h, 9, b->color);
+        text(b->x + b->w / 2, b->y + 6, 0.45f, g ? C_INK : C_TEXT, C2D_AlignCenter, "%s", b->label);
     }
 
+    bool row = false;
     if (slot_row_visible()) {
         u32 mc = meal_color(g_slot);
         rrect(8, SLOT_Y, BOT_W - 16, 18, 9, C_PANEL);
         text(20, SLOT_Y + 2, 0.45f, mc, 0, "<");
         text(BOT_W - 20, SLOT_Y + 2, 0.45f, mc, C2D_AlignRight, ">");
         text(BOT_W / 2, SLOT_Y + 2, 0.45f, C_TEXT, C2D_AlignCenter, "Adding to: %s", meal_name(g_slot));
+        row = true;
+    } else if (build_strip_visible()) {
+        rrect_grad(8, SLOT_Y, BOT_W - 16, 18, 9, 0, 1);
+        text(BOT_W / 2, SLOT_Y + 2, 0.45f, C_INK, C2D_AlignCenter, "Building \"%.18s\": %d foods%s",
+             g_draft.name, (int)g_draft.count, g_tab == TAB_MEALS ? "" : "  (tap to finish)");
+        row = true;
     }
 
     if (g_status[0])
-        text(BOT_W / 2, SLOT_Y - 14 + (slot_row_visible() ? 0 : 14), 0.4f, C_YELLOW, C2D_AlignCenter,
-             "%.64s", g_status);
+        text(BOT_W / 2, SLOT_Y - 14 + (row ? 0 : 14), 0.4f, C_MINT, C2D_AlignCenter, "%.64s", g_status);
 
     /* tab bar */
     float tw = BOT_W / TAB_COUNT;
@@ -1204,10 +1952,10 @@ static void draw_bottom(void)
         float x = i * tw;
         bool on = (Tab)i == g_tab;
         if (on)
-            rrect(x + 3, TAB_Y + 4, tw - 6, SCREEN_H - TAB_Y - 8, 10, tab_color((Tab)i));
+            rrect_grad(x + 2, TAB_Y + 4, tw - 4, SCREEN_H - TAB_Y - 8, 10, x / BOT_W, (x + tw) / BOT_W);
         else
-            C2D_DrawCircleSolid(x + tw / 2, TAB_Y + 9, 0.45f, 3, tab_color((Tab)i));
-        text(x + tw / 2, TAB_Y + (on ? 12 : 16), 0.48f, on ? C_INK : C_MUTED, C2D_AlignCenter, "%s",
+            C2D_DrawCircleSolid(x + tw / 2, TAB_Y + 9, 0.45f, 3, grad((x + tw / 2) / BOT_W));
+        text(x + tw / 2, TAB_Y + (on ? 12 : 16), 0.42f, on ? C_INK : C_MUTED, C2D_AlignCenter, "%s",
              TAB_NAMES[i]);
     }
 }
@@ -1233,6 +1981,9 @@ int main(void)
     favs_load(&g_favs);
     meals_load(&g_meals);
     brands_load(&g_brands);
+    profile_load(&g_profile);
+    series_load(&g_weights, WEIGHTS_FILE);
+    series_load(&g_exercise, EXERCISE_FILE);
     date_today(g_today);
     load_day(g_today);
     g_slot = meal_for_now();
@@ -1258,7 +2009,8 @@ int main(void)
         case TAB_SEARCH: draw_top_search(); break;
         case TAB_BRANDS: draw_top_brands(); break;
         case TAB_FAVS: draw_top_favs(); break;
-        default: draw_top_meals(); break;
+        case TAB_MEALS: draw_top_meals(); break;
+        default: draw_top_profile(); break;
         }
         C2D_TargetClear(bottom, C_BG);
         C2D_SceneBegin(bottom);

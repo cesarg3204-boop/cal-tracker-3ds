@@ -56,13 +56,26 @@ jobs:
       - name: Build ctrtool
         working-directory: project_ctr/ctrtool
         run: make PROJECT_PLATFORM_ARCH=x86_64 deps all
+      # bannertool turns meta/banner.png and meta/banner.wav into the HOME menu
+      # banner (the picture and jingle you get when the app is selected).
+      - uses: actions/checkout@v4
+        with:
+          repository: carstene1ns/3ds-bannertool
+          path: bannertool
+      - name: Build bannertool
+        working-directory: bannertool
+        run: cmake -B build -DCMAKE_BUILD_TYPE=Release && cmake --build build -j
+      - name: Make banner
+        run: |
+          bannertool/build/bannertool makebanner -i meta/banner.png -a meta/banner.wav -o cal-pop.bnr
+          ls -l cal-pop.bnr
       - uses: actions/download-artifact@v4
         with:
           name: cia-inputs
       - name: Make CIA
         run: |
           project_ctr/makerom/bin/makerom -f cia -o cal-pop.cia -target t -exefslogo \
-            -elf cal-pop.elf -icon cal-pop.smdh -rsf meta/app.rsf \
+            -elf cal-pop.elf -icon cal-pop.smdh -banner cal-pop.bnr -rsf meta/app.rsf \
             -major 0 -minor 1 -micro 0 \
             -DAPP_TITLE="CalPop" \
             -DAPP_PRODUCT_CODE="CTR-H-CPOP" \
