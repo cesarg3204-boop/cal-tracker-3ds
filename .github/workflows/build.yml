@@ -31,3 +31,51 @@ jobs:
         with:
           name: cal-tracker-3ds
           path: cal-tracker-3ds.3dsx
+      # Inputs for the CIA job (makerom needs the ELF, not the 3dsx).
+      - uses: actions/upload-artifact@v4
+        with:
+          name: cia-inputs
+          path: |
+            cal-tracker-3ds.elf
+            cal-tracker-3ds.smdh
+          retention-days: 1
+
+  build-cia:
+    needs: build-3dsx
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/checkout@v4
+        with:
+          repository: 3DSGuy/Project_CTR
+          path: project_ctr
+          fetch-depth: 0
+      - name: Build makerom
+        working-directory: project_ctr/makerom
+        run: make PROJECT_PLATFORM_ARCH=x86_64 deps all
+      - uses: actions/download-artifact@v4
+        with:
+          name: cia-inputs
+      - name: Make CIA
+        run: |
+          project_ctr/makerom/bin/makerom -f cia -o cal-tracker-3ds.cia -target t -exefslogo \
+            -elf cal-tracker-3ds.elf -icon cal-tracker-3ds.smdh -rsf meta/app.rsf \
+            -major 0 -minor 1 -micro 0 \
+            -DAPP_TITLE="CalTrack" \
+            -DAPP_PRODUCT_CODE="CTR-H-CALT" \
+            -DAPP_UNIQUE_ID=0xFCA17 \
+            -DAPP_ROMFS=romfs \
+            -DAPP_CATEGORY=Application \
+            -DAPP_USE_ON_SD=true \
+            -DAPP_ENCRYPTED=false \
+            -DAPP_MEMORY_TYPE=Application \
+            -DAPP_SYSTEM_MODE=64MB \
+            -DAPP_SYSTEM_MODE_EXT=Legacy \
+            -DAPP_CPU_SPEED=268MHz \
+            -DAPP_ENABLE_L2_CACHE=false \
+            -DAPP_VERSION_MAJOR=0
+          ls -l cal-tracker-3ds.cia
+      - uses: actions/upload-artifact@v4
+        with:
+          name: cal-tracker-3ds-cia
+          path: cal-tracker-3ds.cia

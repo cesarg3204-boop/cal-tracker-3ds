@@ -28,9 +28,10 @@ A standalone calorie and macro tracker for the Nintendo 3DS (homebrew). It keeps
 
 ## Install
 
-1. Download `cal-tracker-3ds.3dsx` from the latest **Build** run on the Actions tab (artifact `cal-tracker-3ds`).
-2. Copy it to `sdmc:/3ds/` on your SD card.
-3. Launch it from the Homebrew Launcher.
+Each **Build** run on the Actions tab has two downloads:
+
+- `cal-tracker-3ds-cia`: a CIA to install with FBI, or to open in an emulator (File > Install CIA).
+- `cal-tracker-3ds`: a `.3dsx` for the Homebrew Launcher; copy it to `sdmc:/3ds/`.
 
 Data lives in `sdmc:/3ds/caltracker/`: `log/YYYY-MM-DD.json` per day, `foods.json` for saved foods and `targets.json` for your targets.
 
