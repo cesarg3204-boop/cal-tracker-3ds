@@ -6,7 +6,8 @@
 
 #include "../lib/cJSON.h"
 
-#define OFF_BASE "https://world.openfoodfacts.org/cgi/search.pl"
+#define OFF_SEARCH "https://search.openfoodfacts.org/search"
+#define OFF_CGI "https://world.openfoodfacts.org/cgi/search.pl"
 #define OFF_FIELDS "product_name,brands,nutriments,serving_quantity"
 
 static int url_encode(const char *in, char *out, size_t size)
@@ -39,15 +40,22 @@ static int url_encode(const char *in, char *out, size_t size)
     return 0;
 }
 
-int off_search_url(const char *query, char *out, size_t size)
+int off_search_url(int endpoint, const char *query, char *out, size_t size)
 {
     char enc[256];
     if (url_encode(query, enc, sizeof enc) != 0)
         return -1;
-    int n = snprintf(out, size,
-                     OFF_BASE "?search_terms=%s&search_simple=1&action=process&json=1"
-                              "&page_size=%d&fields=" OFF_FIELDS,
+    int n;
+    if (endpoint == 0)
+        n = snprintf(out, size, OFF_SEARCH "?q=%s&page_size=%d&fields=" OFF_FIELDS, enc,
+                     OFF_PAGE_SIZE);
+    else if (endpoint == 1)
+        n = snprintf(out, size,
+                     OFF_CGI "?search_terms=%s&search_simple=1&action=process&json=1"
+                             "&page_size=%d&fields=" OFF_FIELDS,
                      enc, OFF_PAGE_SIZE);
+    else
+        return -1;
     return (n > 0 && (size_t)n < size) ? 0 : -1;
 }
 
@@ -74,7 +82,9 @@ int off_parse_search(const char *json, Food *out, int max)
     cJSON *root = cJSON_Parse(json);
     if (!root)
         return -1;
-    const cJSON *products = cJSON_GetObjectItemCaseSensitive(root, "products");
+    const cJSON *products = cJSON_GetObjectItemCaseSensitive(root, "hits");
+    if (!cJSON_IsArray(products))
+        products = cJSON_GetObjectItemCaseSensitive(root, "products");
     if (!cJSON_IsArray(products)) {
         cJSON_Delete(root);
         return -1;
@@ -106,6 +116,8 @@ int off_parse_search(const char *json, Food *out, int max)
 
         ct_strlcpy(f.name, name->valuestring, sizeof f.name);
         const cJSON *brands = cJSON_GetObjectItemCaseSensitive(p, "brands");
+        if (cJSON_IsArray(brands))
+            brands = cJSON_GetArrayItem(brands, 0); /* newer API: a list of brands */
         if (cJSON_IsString(brands)) {
             /* keep only the first brand of a comma-separated list */
             ct_strlcpy(f.brand, brands->valuestring, sizeof f.brand);

@@ -67,8 +67,11 @@ static void test_dates(void)
 static void test_off(void)
 {
     char url[512];
-    CHECK(off_search_url("peanut butter & jam", url, sizeof url) == 0);
+    CHECK(off_search_url(0, "peanut butter & jam", url, sizeof url) == 0);
+    CHECK(strncmp(url, "https://search.openfoodfacts.org/search?q=peanut+butter+%26+jam&", 64) == 0);
+    CHECK(off_search_url(1, "peanut butter & jam", url, sizeof url) == 0);
     CHECK(strstr(url, "search_terms=peanut+butter+%26+jam&") != NULL);
+    CHECK(off_search_url(2, "x", url, sizeof url) == -1);
 
     const char *json =
         "{\"count\":3,\"products\":["
@@ -87,6 +90,15 @@ static void test_off(void)
     CHECK(strcmp(foods[1].name, "Rice") == 0);
     CHECK(fabsf(foods[1].kcal - 365.0f) < 1.0f);
     CHECK(off_parse_search("not json", foods, 5) == -1);
+
+    /* newer search service: "hits", brands as a list */
+    const char *hits =
+        "{\"hits\":[{\"product_name\":\"Oat Milk\",\"brands\":[\"Oatly\",\"Other\"],"
+        " \"nutriments\":{\"energy-kcal_100g\":46,\"carbohydrates_100g\":6.7}}],\"count\":1}";
+    n = off_parse_search(hits, foods, 5);
+    CHECK(n == 1);
+    CHECK(strcmp(foods[0].brand, "Oatly") == 0);
+    CHECK(NEAR(foods[0].carbs, 6.7f));
 }
 
 static void test_storage(void)

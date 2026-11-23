@@ -225,28 +225,31 @@ static void add_custom_food(void)
 static void run_search(void)
 {
     char url[512];
+    char err[96] = "";
     g_result_count = 0;
-    if (off_search_url(g_query, url, sizeof url) != 0) {
-        status("Search text is too long");
+    /* Try each endpoint in turn; the first one that answers with valid JSON wins. */
+    for (int ep = 0; ep < OFF_ENDPOINT_COUNT; ep++) {
+        if (off_search_url(ep, g_query, url, sizeof url) != 0) {
+            status("Search text is too long");
+            return;
+        }
+        char *body = NULL;
+        if (net_get(url, &body, err, sizeof err) != 0)
+            continue;
+        int n = off_parse_search(body, g_results, OFF_PAGE_SIZE);
+        free(body);
+        if (n < 0) {
+            snprintf(err, sizeof err, "unexpected reply");
+            continue;
+        }
+        g_result_count = n;
+        if (n > 0)
+            status("%d results for \"%.30s\"", n, g_query);
+        else
+            status("No results for \"%.30s\"", g_query);
         return;
     }
-    char *body = NULL;
-    char err[96];
-    if (net_get(url, &body, err, sizeof err) != 0) {
-        status("Search failed: %s", err);
-        return;
-    }
-    int n = off_parse_search(body, g_results, OFF_PAGE_SIZE);
-    free(body);
-    if (n < 0) {
-        status("Could not read the search results");
-        return;
-    }
-    g_result_count = n;
-    if (n > 0)
-        status("%d results for \"%.30s\"", n, g_query);
-    else
-        status("No results for \"%.30s\"", g_query);
+    status("Search failed: %s", err);
 }
 
 /* ---- input -------------------------------------------------------------- */
