@@ -29,15 +29,15 @@ jobs:
         run: make
       - uses: actions/upload-artifact@v4
         with:
-          name: cal-tracker-3ds
-          path: cal-tracker-3ds.3dsx
+          name: cal-pop
+          path: cal-pop.3dsx
       # Inputs for the CIA job (makerom needs the ELF, not the 3dsx).
       - uses: actions/upload-artifact@v4
         with:
           name: cia-inputs
           path: |
-            cal-tracker-3ds.elf
-            cal-tracker-3ds.smdh
+            cal-pop.elf
+            cal-pop.smdh
           retention-days: 1
 
   build-cia:
@@ -61,12 +61,12 @@ jobs:
           name: cia-inputs
       - name: Make CIA
         run: |
-          project_ctr/makerom/bin/makerom -f cia -o cal-tracker-3ds.cia -target t -exefslogo \
-            -elf cal-tracker-3ds.elf -icon cal-tracker-3ds.smdh -rsf meta/app.rsf \
+          project_ctr/makerom/bin/makerom -f cia -o cal-pop.cia -target t -exefslogo \
+            -elf cal-pop.elf -icon cal-pop.smdh -rsf meta/app.rsf \
             -major 0 -minor 1 -micro 0 \
-            -DAPP_TITLE="CalTrack" \
-            -DAPP_PRODUCT_CODE="CTR-H-CALT" \
-            -DAPP_UNIQUE_ID=0xFCA17 \
+            -DAPP_TITLE="CalPop" \
+            -DAPP_PRODUCT_CODE="CTR-H-CPOP" \
+            -DAPP_UNIQUE_ID=0xFCA18 \
             -DAPP_ROMFS=romfs \
             -DAPP_CATEGORY=Application \
             -DAPP_USE_ON_SD=true \
@@ -77,12 +77,12 @@ jobs:
             -DAPP_CPU_SPEED=268MHz \
             -DAPP_ENABLE_L2_CACHE=false \
             -DAPP_VERSION_MAJOR=0
-          ls -l cal-tracker-3ds.cia
+          ls -l cal-pop.cia
       - name: Check the CIA
         run: |
-          head -c 32 cal-tracker-3ds.cia | od -A d -t x1
-          project_ctr/ctrtool/bin/ctrtool -i cal-tracker-3ds.cia
+          head -c 32 cal-pop.cia | od -A d -t x1
+          project_ctr/ctrtool/bin/ctrtool -i cal-pop.cia
       - uses: actions/upload-artifact@v4
         with:
-          name: cal-tracker-3ds-cia
-          path: cal-tracker-3ds.cia
+          name: cal-pop-cia
+          path: cal-pop.cia

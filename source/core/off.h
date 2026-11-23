@@ -19,4 +19,11 @@ int off_search_url(int endpoint, const char *query, char *out, size_t size);
  * Returns the number of foods written (<= max), or -1. */
 int off_parse_search(const char *json, Food *out, int max);
 
+/* Products of one brand. */
+#define OFF_BRAND_FETCH 100
+int off_brand_url(int endpoint, const char *brand, char *out, size_t size);
+/* Like off_parse_search, but keeps only products whose brand list contains
+ * `brand` (case-insensitive) and drops duplicate names. */
+int off_parse_brand(const char *json, const char *brand, Food *out, int max);
+
 #endif

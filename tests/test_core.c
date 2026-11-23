@@ -111,6 +111,21 @@ static void test_off(void)
     CHECK(n == 2);
     CHECK(strcmp(foods[0].name, "Papas fritas") == 0);
     CHECK(strncmp(foods[1].name, "Caf", 3) == 0);
+
+    /* brand pages: keep only that brand, drop duplicate names */
+    CHECK(off_brand_url(0, "Quest", url, sizeof url) == 0 && strstr(url, "q=Quest&") != NULL);
+    CHECK(off_brand_url(1, "Quest", url, sizeof url) == 0 && strstr(url, "tag_0=Quest&") != NULL);
+    const char *brand_json =
+        "{\"hits\":["
+        "{\"product_name\":\"Cookies & Cream Bar\",\"brands\":[\"Quest Nutrition\"],\"nutriments\":{\"energy-kcal_100g\":350}},"
+        "{\"product_name\":\"Quest for Fire Chips\",\"brands\":\"Other Co\",\"nutriments\":{\"energy-kcal_100g\":500}},"
+        "{\"product_name\":\"Cookies & cream bar\",\"brands\":\"Quest\",\"nutriments\":{\"energy-kcal_100g\":351}},"
+        "{\"product_name\":\"Tortilla Style Chips\",\"brands\":\"quest\",\"nutriments\":{\"energy-kcal_100g\":470}}"
+        "]}";
+    n = off_parse_brand(brand_json, "Quest", foods, 5);
+    CHECK(n == 2);
+    CHECK(strcmp(foods[0].name, "Cookies & Cream Bar") == 0);
+    CHECK(strcmp(foods[1].name, "Tortilla Style Chips") == 0);
 }
 
 static void test_storage(void)
@@ -124,6 +139,7 @@ static void test_storage(void)
     static DayLog day, loaded;
     CHECK(day_load("2026-11-23", &day) == 0 && day.count == 0);
     Entry e;
+    memset(&e, 0, sizeof e);
     e.food = make_food("Eggs", 143, 12.6f, 0.7f, 9.5f);
     e.grams = 100;
     e.meal = MEAL_BREAKFAST;
@@ -159,6 +175,57 @@ static void test_storage(void)
     CHECK(targets_save(&t) == 0);
     Targets t2;
     CHECK(targets_load(&t2) == 0 && NEAR(t2.kcal, 2400) && NEAR(t2.fat, 70));
+
+    /* quick entries keep their flag */
+    e.food = make_food("Abuela's arroz con pollo", 650, 35, 80, 18);
+    e.grams = 100;
+    e.meal = MEAL_LUNCH;
+    e.quick = 1;
+    CHECK(day_add(&loaded, &e) == 0 && day_save(&loaded) == 0);
+    CHECK(day_load("2026-11-23", &day) == 0 && day.count == 2 && day.entries[1].quick == 1);
+    CHECK(day.entries[0].quick == 0);
+    CHECK(NEAR(sum_entries(day.entries, day.count, MEAL_LUNCH).kcal, 650));
+
+    /* favorites */
+    static FavList favs, favs2;
+    CHECK(favs_load(&favs) == 0 && favs.count == 0);
+    Food bar = make_food("Protein Bar", 350, 30, 40, 8);
+    ct_strlcpy(bar.brand, "Quest", sizeof bar.brand);
+    CHECK(favs_toggle(&favs, &bar, 60) == 1);
+    CHECK(favs_toggle(&favs, &a, 0) == 1);
+    CHECK(favs_find(&favs, &bar) == 0 && NEAR(favs.items[1].grams, 100));
+    CHECK(favs_save(&favs) == 0 && favs_load(&favs2) == 0 && favs2.count == 2);
+    CHECK(NEAR(favs2.items[0].grams, 60) && strcmp(favs2.items[0].food.brand, "Quest") == 0);
+    CHECK(favs_toggle(&favs2, &bar, 0) == 0 && favs2.count == 1 && favs_find(&favs2, &bar) == -1);
+
+    /* saved meals */
+    static MealList meals, meals2;
+    static SavedMeal m;
+    memset(&m, 0, sizeof m);
+    ct_strlcpy(m.name, "My usual breakfast", sizeof m.name);
+    m.items[0] = day.entries[0];
+    m.items[1] = day.entries[1];
+    m.count = 2;
+    CHECK(meals_load(&meals) == 0 && meals.count == 0);
+    CHECK(meals_add(&meals, &m) == 0 && meals_save(&meals) == 0);
+    CHECK(meals_load(&meals2) == 0 && meals2.count == 1 && meals2.items[0].count == 2);
+    CHECK(strcmp(meals2.items[0].name, "My usual breakfast") == 0);
+    CHECK(meals2.items[0].items[1].quick == 1);
+    meals_remove(&meals2, 0);
+    CHECK(meals2.count == 0);
+
+    /* brands and their cached products */
+    static BrandList brands, brands2;
+    CHECK(brands_load(&brands) == 0 && brands.count == 0);
+    CHECK(brands_add(&brands, "Quest") == 1 && brands_add(&brands, "Barebells") == 1);
+    CHECK(brands_add(&brands, "quest") == 0 && brands.count == 2);
+    CHECK(brands_save(&brands) == 0 && brands_load(&brands2) == 0 && brands2.count == 2);
+    brands_remove(&brands2, 0);
+    CHECK(brands2.count == 1 && strcmp(brands2.names[0], "Barebells") == 0);
+    Food cached[4];
+    CHECK(brand_cache_load("Quest Nutrition", cached, 4) == -1);
+    CHECK(brand_cache_save("Quest Nutrition", &bar, 1) == 0);
+    CHECK(brand_cache_load("Quest Nutrition", cached, 4) == 1 && strcmp(cached[0].name, "Protein Bar") == 0);
 }
 
 static void test_cache_full(void)

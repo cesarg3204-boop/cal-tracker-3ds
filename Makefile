@@ -11,7 +11,7 @@ TOPDIR ?= $(CURDIR)
 include $(DEVKITARM)/3ds_rules
 
 #---------------------------------------------------------------------------------
-TARGET		:=	cal-tracker-3ds
+TARGET		:=	cal-pop
 BUILD		:=	build
 SOURCES		:=	source source/core source/lib
 DATA		:=	data
@@ -20,8 +20,8 @@ GRAPHICS	:=	gfx
 GFXBUILD	:=	$(BUILD)
 ROMFS		:=	romfs
 
-APP_TITLE	:=	Cal Tracker
-APP_DESCRIPTION	:=	Calorie and macro tracker
+APP_TITLE	:=	Cal Pop
+APP_DESCRIPTION	:=	Colorful calorie and macro tracker
 APP_AUTHOR	:=	cesarg3204-boop
 
 #---------------------------------------------------------------------------------

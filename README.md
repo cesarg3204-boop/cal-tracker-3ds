@@ -1,4 +1,6 @@
-# Cal Tracker 3DS
+# Cal Pop (3DS)
+
+The colorful edition of Cal Tracker 3DS. It shares its data folder with the plain version, so both apps see the same log.
 
 A standalone calorie and macro tracker for the Nintendo 3DS (homebrew). It keeps its own food log on the SD card and looks foods up on [Open Food Facts](https://world.openfoodfacts.org). It needs no account and no server.
 
@@ -11,7 +13,16 @@ A standalone calorie and macro tracker for the Nintendo 3DS (homebrew). It keeps
 - Custom foods entered per serving.
 - Browse, edit and delete past days.
 
-## Controls
+## Cal Pop extras
+
+- Touch tab bar on the bottom screen: Today, Search, Brands, Favs, Meals (L and R also switch tabs).
+- **Favorites:** press X on any food to star it; on the Favs tab, A logs it with its usual grams.
+- **Quick add:** type a name with calories and macros, no grams needed.
+- **Saved meals:** on Today, select a food and tap *Save as meal* to save everything in that meal (for example all of Breakfast). Log it later from the Meals tab, normal size or scaled.
+- **My Brands:** follow brands like Quest or Barebells and browse their products. Product lists are saved for offline use; Y refreshes.
+- "Adding to" picker on the bottom screen (or Left/Right) chooses the meal food goes into.
+
+## Controls (plain version)
 
 | Screen | Button | Action |
 | --- | --- | --- |
@@ -30,8 +41,8 @@ A standalone calorie and macro tracker for the Nintendo 3DS (homebrew). It keeps
 
 Each **Build** run on the Actions tab has two downloads:
 
-- `cal-tracker-3ds-cia`: a CIA to install with FBI, or to open in an emulator (File > Install CIA).
-- `cal-tracker-3ds`: a `.3dsx` for the Homebrew Launcher; copy it to `sdmc:/3ds/`.
+- `cal-pop-cia`: a CIA to install with FBI, or to open in an emulator (File > Install CIA).
+- `cal-pop`: a `.3dsx` for the Homebrew Launcher; copy it to `sdmc:/3ds/`.
 
 Data lives in `sdmc:/3ds/caltracker/`: `log/YYYY-MM-DD.json` per day, `foods.json` for saved foods and `targets.json` for your targets.
 
