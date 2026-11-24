@@ -45,6 +45,12 @@ A standalone calorie and macro tracker for the Nintendo 3DS (homebrew). It keeps
 
 ## Install
 
+**Quickest way:** in FBI on your 3DS, go to *Remote Install > Scan QR Code* and scan this. It always installs the newest build, and scanning it again updates the app (your logs and foods stay).
+
+<img src="docs/fbi-qr.png" alt="QR code for FBI: installs cal-pop.cia" width="220">
+
+It points to https://github.com/cesarg3204-boop/cal-tracker-3ds/releases/download/cal-pop-latest/cal-pop.cia
+
 Each **Build** run on the Actions tab has two downloads:
 
 - `cal-pop-cia`: a CIA to install with FBI, or to open in an emulator (File > Install CIA).
