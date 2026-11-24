@@ -243,6 +243,26 @@ static void text(float x, float y, float scale, u32 color, u32 flags, const char
     C2D_DrawText(&t, C2D_WithColor | flags, x, y, 0.5f, scale, scale, color);
 }
 
+/* Like text(), but shrinks the text (down to 70%) so it fits in max_w. */
+static void text_fit(float x, float y, float scale, float max_w, u32 color, u32 flags, const char *fmt, ...)
+{
+    char buf[160];
+    va_list ap;
+    va_start(ap, fmt);
+    vsnprintf(buf, sizeof buf, fmt, ap);
+    va_end(ap);
+    C2D_Text t;
+    C2D_TextParse(&t, g_textbuf, buf);
+    C2D_TextOptimize(&t);
+    float w = 0, h = 0;
+    C2D_TextGetDimensions(&t, scale, scale, &w, &h);
+    if (w > max_w && w > 0) {
+        float s2 = scale * max_w / w;
+        scale = s2 < scale * 0.7f ? scale * 0.7f : s2;
+    }
+    C2D_DrawText(&t, C2D_WithColor | flags, x, y, 0.5f, scale, scale, color);
+}
+
 /* Rounded rectangle. Use opaque colors: the pieces overlap. */
 static void rrect(float x, float y, float w, float h, float r, u32 color)
 {
@@ -1677,10 +1697,11 @@ static void food_row(float y, bool selected, const char *name, const char *brand
     }
     if (fav)
         fav_dot(13, y + 7);
+    /* keep the name clear of the value on the right */
     if (brand && brand[0])
-        text(20, y, TEXT_SCALE, C_TEXT, 0, "%.28s  (%.14s)", name, brand);
+        text_fit(20, y, TEXT_SCALE, TOP_W - 145, C_TEXT, 0, "%.28s  (%.14s)", name, brand);
     else
-        text(20, y, TEXT_SCALE, C_TEXT, 0, "%.40s", name);
+        text_fit(20, y, TEXT_SCALE, TOP_W - 145, C_TEXT, 0, "%.40s", name);
     text(TOP_W - 10, y, TEXT_SCALE, C_MUTED, C2D_AlignRight, "%s", right);
 }
 
@@ -2500,25 +2521,34 @@ static void card_bg(void)
 static void food_card(const Food *f, float grams, bool quick)
 {
     card_bg();
-    text(14, 12, 0.55f, C_TEXT, 0, "%.34s", f->name);
+    const float W = BOT_W - 28; /* text width inside the card */
+    /* one item per line, so nothing can overlap */
+    text_fit(14, 11, 0.55f, W, C_TEXT, 0, "%.48s", f->name);
+    char sub[96] = "";
     if (!quick && f->brand[0])
-        text(14, 29, 0.45f, C_MUTED, 0, "%.28s", f->brand);
-    if (!quick && f->serving_g > 0)
-        text(BOT_W - 14, 29, 0.42f, C_MUTED, C2D_AlignRight, "Serving: %.16s%s%.0f g", f->serving_label,
-             f->serving_label[0] ? " = " : "", f->serving_g);
+        snprintf(sub, sizeof sub, "%.30s", f->brand);
+    if (!quick && f->serving_g > 0) {
+        size_t n = strlen(sub);
+        snprintf(sub + n, sizeof sub - n, "%sServing: %.20s%s%.0f g", n ? "   " : "", f->serving_label,
+                 f->serving_label[0] ? " = " : "", f->serving_g);
+    }
+    if (sub[0])
+        text_fit(14, 27, 0.42f, W, C_MUTED, 0, "%s", sub);
+
     Entry e;
     memset(&e, 0, sizeof e);
     e.food = *f;
     e.grams = quick ? 100 : (grams > 0 ? grams : 100);
     Totals t = entry_totals(&e);
     if (quick)
-        text(14, 47, 0.5f, C_TURQ, 0, "%.0f kcal", t.kcal);
+        text(14, 40, 0.5f, C_TURQ, 0, "%.0f kcal", t.kcal);
     else
-        text(14, 47, 0.5f, C_TURQ, 0, "%.0f kcal in %.0f g", t.kcal, e.grams);
-    /* up to three key micronutrients this food lists */
-    char micros[64] = "";
+        text(14, 40, 0.5f, C_TURQ, 0, "%.0f kcal in %.0f g", t.kcal, e.grams);
+
+    /* the key micronutrients this food lists, on their own line */
+    char micros[96] = "";
     int shown = 0;
-    for (int i = 0; i < MICRO_KEY_COUNT && shown < 3; i++) {
+    for (int i = 0; i < MICRO_KEY_COUNT; i++) {
         if (t.micro[i] <= 0)
             continue;
         char v[16];
@@ -2529,16 +2559,17 @@ static void food_card(const Food *f, float grams, bool quick)
         shown++;
     }
     if (shown > 0)
-        text(BOT_W - 14, 49, 0.4f, C_MUTED, C2D_AlignRight, "%s", micros);
+        text_fit(14, 56, 0.4f, W, C_MUTED, 0, "%s", micros);
 
-    /* three macro chips, green -> turquoise -> blue */
+    /* three macro chips, green -> turquoise -> blue: name on top, grams below */
     float cw = (BOT_W - 12 - 16 - 16) / 3;
     const char *names[3] = {"Protein", "Carbs", "Fat"};
     float vals[3] = {t.protein, t.carbs, t.fat};
     for (int i = 0; i < 3; i++) {
         float x = 14 + i * (cw + 8);
-        rrect_grad(x, 70, cw, 26, 8, x / BOT_W, (x + cw) / BOT_W);
-        text(x + cw / 2, 75, 0.45f, C_INK, C2D_AlignCenter, "%s %.1f g", names[i], vals[i]);
+        rrect_grad(x, 71, cw, 29, 8, x / BOT_W, (x + cw) / BOT_W);
+        text(x + cw / 2, 72, 0.4f, C_INK, C2D_AlignCenter, "%s", names[i]);
+        text(x + cw / 2, 84, 0.45f, C_INK, C2D_AlignCenter, "%.1f g", vals[i]);
     }
 }
 
