@@ -29,6 +29,7 @@ typedef struct {
     Food food;
     float grams;
     Meal meal;
+    int quick; /* quick entry: food holds the totals and grams is 100 */
 } Entry;
 
 typedef struct {

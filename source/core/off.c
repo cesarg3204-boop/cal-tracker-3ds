@@ -61,6 +61,25 @@ int off_search_url(int endpoint, const char *query, char *out, size_t size)
     return (n > 0 && (size_t)n < size) ? 0 : -1;
 }
 
+int off_brand_url(int endpoint, const char *brand, char *out, size_t size)
+{
+    char enc[128];
+    if (url_encode(brand, enc, sizeof enc) != 0)
+        return -1;
+    int n;
+    if (endpoint == 0 || endpoint == 1)
+        n = snprintf(out, size, OFF_SEARCH "?q=%s%s&langs=es,en&page_size=%d&fields=" OFF_FIELDS,
+                     enc, endpoint == 1 ? "~" : "", OFF_BRAND_FETCH);
+    else if (endpoint == 2)
+        n = snprintf(out, size,
+                     OFF_CGI "?action=process&tagtype_0=brands&tag_contains_0=contains&tag_0=%s"
+                             "&json=1&page_size=%d&fields=" OFF_FIELDS,
+                     enc, OFF_BRAND_FETCH);
+    else
+        return -1;
+    return (n > 0 && (size_t)n < size) ? 0 : -1;
+}
+
 static int get_number(const cJSON *obj, const char *key, float *out)
 {
     const cJSON *v = cJSON_GetObjectItemCaseSensitive(obj, key);
@@ -114,7 +133,107 @@ static const char *first_name(const cJSON *p)
     return NULL;
 }
 
+static char lower(char c)
+{
+    return (c >= 'A' && c <= 'Z') ? (char)(c + 32) : c;
+}
+
+/* Case-insensitive (ASCII) substring test. */
+int off_text_contains(const char *hay, const char *needle)
+{
+    size_t n = strlen(needle);
+    if (n == 0)
+        return 1;
+    for (; *hay; hay++) {
+        size_t i = 0;
+        while (i < n && hay[i] && lower(hay[i]) == lower(needle[i]))
+            i++;
+        if (i == n)
+            return 1;
+    }
+    return 0;
+}
+
+#define contains_ci off_text_contains
+
+/* Edit distance between two short strings, ignoring case (capped inputs). */
+static int edit_distance(const char *a, const char *b)
+{
+    int la = (int)strlen(a), lb = (int)strlen(b);
+    if (la > 40 || lb > 40)
+        return 99;
+    int prev[41], cur[41];
+    for (int j = 0; j <= lb; j++)
+        prev[j] = j;
+    for (int i = 1; i <= la; i++) {
+        cur[0] = i;
+        for (int j = 1; j <= lb; j++) {
+            int cost = lower(a[i - 1]) == lower(b[j - 1]) ? 0 : 1;
+            int best = prev[j - 1] + cost;
+            if (prev[j] + 1 < best) best = prev[j] + 1;
+            if (cur[j - 1] + 1 < best) best = cur[j - 1] + 1;
+            cur[j] = best;
+        }
+        memcpy(prev, cur, sizeof(int) * (size_t)(lb + 1));
+    }
+    return prev[lb];
+}
+
+/* One brand name against the wanted brand: contains it, or a near typo. */
+static int brand_matches(const char *have, const char *want)
+{
+    if (contains_ci(have, want))
+        return 1;
+    /* compare each comma-separated part on its own */
+    char part[64];
+    const char *p = have;
+    while (*p) {
+        size_t n = strcspn(p, ",");
+        if (n >= sizeof part)
+            n = sizeof part - 1;
+        memcpy(part, p, n);
+        part[n] = '\0';
+        char *s = part;
+        while (*s == ' ')
+            s++;
+        size_t wl = strlen(want);
+        int allowed = wl >= 8 ? 2 : (wl >= 4 ? 1 : 0);
+        if (allowed && edit_distance(s, want) <= allowed)
+            return 1;
+        p += strcspn(p, ",");
+        if (*p == ',')
+            p++;
+    }
+    return 0;
+}
+
+/* Does the product's "brands" (a string or a list) match the brand? */
+static int has_brand(const cJSON *brands, const char *brand)
+{
+    if (cJSON_IsString(brands))
+        return brand_matches(brands->valuestring, brand);
+    const cJSON *b;
+    cJSON_ArrayForEach(b, brands)
+    {
+        if (cJSON_IsString(b) && brand_matches(b->valuestring, brand))
+            return 1;
+    }
+    return 0;
+}
+
+static int parse_products(const char *json, const char *brand_filter, Food *out, int max);
+
 int off_parse_search(const char *json, Food *out, int max)
+{
+    return parse_products(json, NULL, out, max);
+}
+
+int off_parse_brand(const char *json, const char *brand, Food *out, int max)
+{
+    return parse_products(json, brand, out, max);
+}
+
+static int parse_products(const char *json, const char *brand_filter, Food *out, int max)
 {
     cJSON *root = cJSON_Parse(json);
     if (!root)
@@ -137,6 +256,15 @@ int off_parse_search(const char *json, Food *out, int max)
         const cJSON *nutr = cJSON_GetObjectItemCaseSensitive(p, "nutriments");
         if (!name || !is_latin(name) || !cJSON_IsObject(nutr))
             continue;
+        if (brand_filter) {
+            if (!has_brand(cJSON_GetObjectItemCaseSensitive(p, "brands"), brand_filter))
+                continue;
+            int dup = 0;
+            for (int k = 0; k < n && !dup; k++)
+                dup = contains_ci(out[k].name, name) && strlen(out[k].name) == strlen(name);
+            if (dup)
+                continue;
+        }
 
         Food f;
         memset(&f, 0, sizeof f);

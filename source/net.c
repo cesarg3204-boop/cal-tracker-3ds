@@ -73,7 +73,7 @@ int net_get(const char *url, char **out, char *err, size_t err_size)
 
     Buffer buf = {NULL, 0};
     curl_easy_setopt(curl, CURLOPT_URL, url);
-    curl_easy_setopt(curl, CURLOPT_USERAGENT, "CalTracker3DS/0.1 (Nintendo 3DS homebrew)");
+    curl_easy_setopt(curl, CURLOPT_USERAGENT, "CalPop3DS/0.1 (Nintendo 3DS homebrew)");
     curl_easy_setopt(curl, CURLOPT_CAINFO, "romfs:/cacert.pem");
     curl_easy_setopt(curl, CURLOPT_FOLLOWLOCATION, 1L);
     curl_easy_setopt(curl, CURLOPT_ACCEPT_ENCODING, "");

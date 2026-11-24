@@ -110,9 +110,32 @@ static void food_from_json(const cJSON *obj, Food *food)
     food->serving_g = num(obj, "serving_g");
 }
 
-static void path_for(char *out, size_t size, const char *name)
+static void entry_to_json(cJSON *obj, const Entry *e)
+{
+    food_to_json(obj, &e->food);
+    cJSON_AddNumberToObject(obj, "grams", e->grams);
+    cJSON_AddNumberToObject(obj, "meal", e->meal);
+    if (e->quick)
+        cJSON_AddTrueToObject(obj, "quick");
+}
+
+static void entry_from_json(const cJSON *obj, Entry *e)
+{
+    food_from_json(obj, &e->food);
+    e->grams = num(obj, "grams");
+    int meal = (int)num(obj, "meal");
+    e->meal = (meal >= 0 && meal < MEAL_COUNT) ? (Meal)meal : MEAL_SNACKS;
+    e->quick = cJSON_IsTrue(cJSON_GetObjectItemCaseSensitive(obj, "quick"));
+}
+
+void storage_path(char *out, size_t size, const char *name)
 {
     snprintf(out, size, "%s/%s", g_base, name);
+}
+
+static void path_for(char *out, size_t size, const char *name)
+{
+    storage_path(out, size, name);
 }
 
 /* ---- public API ------------------------------------------------------- */
@@ -148,11 +171,7 @@ int day_load(const char *date, DayLog *day)
     {
         if (day->count >= CT_MAX_ENTRIES)
             break;
-        Entry *e = &day->entries[day->count++];
-        food_from_json(item, &e->food);
-        e->grams = num(item, "grams");
-        int meal = (int)num(item, "meal");
-        e->meal = (meal >= 0 && meal < MEAL_COUNT) ? (Meal)meal : MEAL_SNACKS;
+        entry_from_json(item, &day->entries[day->count++]);
     }
     cJSON_Delete(root);
     return 0;
@@ -165,9 +184,7 @@ int day_save(const DayLog *day)
     cJSON *entries = cJSON_AddArrayToObject(root, "entries");
     for (size_t i = 0; i < day->count; i++) {
         cJSON *obj = cJSON_CreateObject();
-        food_to_json(obj, &day->entries[i].food);
-        cJSON_AddNumberToObject(obj, "grams", day->entries[i].grams);
-        cJSON_AddNumberToObject(obj, "meal", day->entries[i].meal);
+        entry_to_json(obj, &day->entries[i]);
         cJSON_AddItemToArray(entries, obj);
     }
     char path[300];
@@ -285,4 +302,256 @@ int targets_save(const Targets *t)
     int rc = write_json(path, root);
     cJSON_Delete(root);
     return rc;
+}
+
+/* ---- helpers for the list files below ----------------------------------- */
+
+static cJSON *load_json(const char *name)
+{
+    char path[300];
+    path_for(path, sizeof path, name);
+    char *text = read_file(path);
+    if (!text)
+        return NULL;
+    cJSON *root = cJSON_Parse(text);
+    free(text);
+    return root;
+}
+
+static int save_json(const char *name, cJSON *root)
+{
+    char path[300];
+    path_for(path, sizeof path, name);
+    int rc = write_json(path, root);
+    cJSON_Delete(root);
+    return rc;
+}
+
+static int same_food(const Food *a, const Food *b)
+{
+    return strcmp(a->name, b->name) == 0 && strcmp(a->brand, b->brand) == 0;
+}
+
+/* ---- favorites ---------------------------------------------------------- */
+
+int favs_load(FavList *favs)
+{
+    memset(favs, 0, sizeof *favs);
+    cJSON *root = load_json("favorites.json");
+    const cJSON *item;
+    cJSON_ArrayForEach(item, root)
+    {
+        if (favs->count >= CT_MAX_FAVS)
+            break;
+        Favorite *f = &favs->items[favs->count++];
+        food_from_json(item, &f->food);
+        f->grams = num(item, "grams");
+        if (f->grams <= 0)
+            f->grams = 100;
+    }
+    cJSON_Delete(root);
+    return 0;
+}
+
+int favs_save(const FavList *favs)
+{
+    cJSON *root = cJSON_CreateArray();
+    for (size_t i = 0; i < favs->count; i++) {
+        cJSON *obj = cJSON_CreateObject();
+        food_to_json(obj, &favs->items[i].food);
+        cJSON_AddNumberToObject(obj, "grams", favs->items[i].grams);
+        cJSON_AddItemToArray(root, obj);
+    }
+    return save_json("favorites.json", root);
+}
+
+int favs_find(const FavList *favs, const Food *food)
+{
+    for (size_t i = 0; i < favs->count; i++)
+        if (same_food(&favs->items[i].food, food))
+            return (int)i;
+    return -1;
+}
+
+int favs_toggle(FavList *favs, const Food *food, float grams)
+{
+    int i = favs_find(favs, food);
+    if (i >= 0) {
+        memmove(&favs->items[i], &favs->items[i + 1],
+                (favs->count - (size_t)i - 1) * sizeof(Favorite));
+        favs->count--;
+        return 0;
+    }
+    if (favs->count >= CT_MAX_FAVS)
+        return -1;
+    favs->items[favs->count].food = *food;
+    favs->items[favs->count].grams = grams > 0 ? grams : 100;
+    favs->count++;
+    return 1;
+}
+
+/* ---- saved meals -------------------------------------------------------- */
+
+int meals_load(MealList *meals)
+{
+    memset(meals, 0, sizeof *meals);
+    cJSON *root = load_json("meals.json");
+    const cJSON *item;
+    cJSON_ArrayForEach(item, root)
+    {
+        if (meals->count >= CT_MAX_SAVED_MEALS)
+            break;
+        SavedMeal *m = &meals->items[meals->count++];
+        ct_strlcpy(m->name, str(item, "name"), sizeof m->name);
+        const cJSON *e;
+        cJSON_ArrayForEach(e, cJSON_GetObjectItemCaseSensitive(item, "items"))
+        {
+            if (m->count >= CT_MAX_MEAL_ITEMS)
+                break;
+            entry_from_json(e, &m->items[m->count++]);
+        }
+    }
+    cJSON_Delete(root);
+    return 0;
+}
+
+int meals_save(const MealList *meals)
+{
+    cJSON *root = cJSON_CreateArray();
+    for (size_t i = 0; i < meals->count; i++) {
+        const SavedMeal *m = &meals->items[i];
+        cJSON *obj = cJSON_CreateObject();
+        cJSON_AddStringToObject(obj, "name", m->name);
+        cJSON *items = cJSON_AddArrayToObject(obj, "items");
+        for (size_t j = 0; j < m->count; j++) {
+            cJSON *e = cJSON_CreateObject();
+            entry_to_json(e, &m->items[j]);
+            cJSON_AddItemToArray(items, e);
+        }
+        cJSON_AddItemToArray(root, obj);
+    }
+    return save_json("meals.json", root);
+}
+
+int meals_add(MealList *meals, const SavedMeal *meal)
+{
+    if (meals->count >= CT_MAX_SAVED_MEALS)
+        return -1;
+    meals->items[meals->count++] = *meal;
+    return 0;
+}
+
+void meals_remove(MealList *meals, size_t index)
+{
+    if (index >= meals->count)
+        return;
+    memmove(&meals->items[index], &meals->items[index + 1],
+            (meals->count - index - 1) * sizeof(SavedMeal));
+    meals->count--;
+}
+
+/* ---- brands ------------------------------------------------------------- */
+
+int brands_load(BrandList *brands)
+{
+    memset(brands, 0, sizeof *brands);
+    cJSON *root = load_json("brands.json");
+    const cJSON *item;
+    cJSON_ArrayForEach(item, root)
+    {
+        if (brands->count >= CT_MAX_BRANDS)
+            break;
+        if (cJSON_IsString(item) && item->valuestring[0])
+            ct_strlcpy(brands->names[brands->count++], item->valuestring, CT_BRAND_LEN);
+    }
+    cJSON_Delete(root);
+    return 0;
+}
+
+int brands_save(const BrandList *brands)
+{
+    cJSON *root = cJSON_CreateArray();
+    for (size_t i = 0; i < brands->count; i++)
+        cJSON_AddItemToArray(root, cJSON_CreateString(brands->names[i]));
+    return save_json("brands.json", root);
+}
+
+static int ascii_casecmp(const char *a, const char *b)
+{
+    for (;; a++, b++) {
+        int ca = (*a >= 'A' && *a <= 'Z') ? *a + 32 : *a;
+        int cb = (*b >= 'A' && *b <= 'Z') ? *b + 32 : *b;
+        if (ca != cb || !ca)
+            return ca - cb;
+    }
+}
+
+int brands_add(BrandList *brands, const char *name)
+{
+    for (size_t i = 0; i < brands->count; i++)
+        if (ascii_casecmp(brands->names[i], name) == 0)
+            return 0; /* already there */
+    if (brands->count >= CT_MAX_BRANDS)
+        return -1;
+    ct_strlcpy(brands->names[brands->count++], name, CT_BRAND_LEN);
+    return 1;
+}
+
+void brands_remove(BrandList *brands, size_t index)
+{
+    if (index >= brands->count)
+        return;
+    memmove(brands->names[index], brands->names[index + 1],
+            (brands->count - index - 1) * CT_BRAND_LEN);
+    brands->count--;
+}
+
+/* "Quest Nutrition" -> "brand_quest-nutrition.json" */
+static void brand_file(const char *brand, char *out, size_t size)
+{
+    char slug[CT_BRAND_LEN];
+    size_t n = 0;
+    for (const char *p = brand; *p && n + 1 < sizeof slug; p++) {
+        char c = *p;
+        if (c >= 'A' && c <= 'Z')
+            c += 32;
+        if ((c >= 'a' && c <= 'z') || (c >= '0' && c <= '9'))
+            slug[n++] = c;
+        else if (n > 0 && slug[n - 1] != '-')
+            slug[n++] = '-';
+    }
+    slug[n] = '\0';
+    snprintf(out, size, "brand_%s.json", slug);
+}
+
+int brand_cache_load(const char *brand, Food *out, int max)
+{
+    char name[80];
+    brand_file(brand, name, sizeof name);
+    cJSON *root = load_json(name);
+    if (!root)
+        return -1;
+    int n = 0;
+    const cJSON *item;
+    cJSON_ArrayForEach(item, root)
+    {
+        if (n >= max)
+            break;
+        food_from_json(item, &out[n++]);
+    }
+    cJSON_Delete(root);
+    return n;
+}
+
+int brand_cache_save(const char *brand, const Food *foods, int count)
+{
+    char name[80];
+    brand_file(brand, name, sizeof name);
+    cJSON *root = cJSON_CreateArray();
+    for (int i = 0; i < count; i++) {
+        cJSON *obj = cJSON_CreateObject();
+        food_to_json(obj, &foods[i]);
+        cJSON_AddItemToArray(root, obj);
+    }
+    return save_json(name, root);
 }
