@@ -72,8 +72,6 @@ jobs:
       - uses: actions/download-artifact@v4
         with:
           name: cia-inputs
-      # 0xFCA20: a fresh ID (was 0xFCA18) so the HOME menu has no old banner
-      # or jingle saved for it.
       - name: Make CIA
         # Every build gets a higher version (from the run number) so the HOME
         # menu sees an update and refreshes its cached banner and jingle.
@@ -84,7 +82,7 @@ jobs:
             -major 1 -minor $(( (N / 16) % 64 )) -micro $(( N % 16 )) \
             -DAPP_TITLE="CalPop" \
             -DAPP_PRODUCT_CODE="CTR-H-CPOP" \
-            -DAPP_UNIQUE_ID=0xFCA20 \
+            -DAPP_UNIQUE_ID=0xFCA18 \
             -DAPP_ROMFS=romfs \
             -DAPP_CATEGORY=Application \
             -DAPP_USE_ON_SD=true \
