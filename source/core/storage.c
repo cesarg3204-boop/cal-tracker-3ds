@@ -97,6 +97,14 @@ static void food_to_json(cJSON *obj, const Food *food)
     cJSON_AddNumberToObject(obj, "carbs", food->carbs);
     cJSON_AddNumberToObject(obj, "fat", food->fat);
     cJSON_AddNumberToObject(obj, "serving_g", food->serving_g);
+    cJSON *micro = NULL;
+    for (int i = 0; i < MICRO_COUNT; i++) {
+        if (food->micro[i] <= 0)
+            continue;
+        if (!micro)
+            micro = cJSON_AddObjectToObject(obj, "micro");
+        cJSON_AddNumberToObject(micro, micro_info((Micro)i)->json, food->micro[i]);
+    }
 }
 
 static void food_from_json(const cJSON *obj, Food *food)
@@ -108,6 +116,9 @@ static void food_from_json(const cJSON *obj, Food *food)
     food->carbs = num(obj, "carbs");
     food->fat = num(obj, "fat");
     food->serving_g = num(obj, "serving_g");
+    const cJSON *micro = cJSON_GetObjectItemCaseSensitive(obj, "micro");
+    for (int i = 0; i < MICRO_COUNT; i++)
+        food->micro[i] = micro ? num(micro, micro_info((Micro)i)->json) : 0;
 }
 
 static void entry_to_json(cJSON *obj, const Entry *e)

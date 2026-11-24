@@ -5,6 +5,7 @@
 #include <string.h>
 
 #include "../source/core/activity.h"
+#include "../source/core/barcode.h"
 #include "../source/core/date.h"
 #include "../source/core/food.h"
 #include "../source/core/off.h"
@@ -305,6 +306,196 @@ static void test_profile(void)
     CHECK(series_load(&log, STEPS_FILE) == 0 && log.count == 0);
 }
 
+static void test_micros(void)
+{
+    const char *json =
+        "{\"products\":[{\"product_name\":\"Oats\",\"nutriments\":{\"energy-kcal_100g\":379,"
+        "\"fiber_100g\":10.1,\"iron_100g\":0.0043,\"zinc_100g\":\"0.0036\",\"salt_100g\":0.01,"
+        "\"vitamin-d_100g\":0.0000025}}]}";
+    Food f[2];
+    CHECK(off_parse_search(json, f, 2) == 1);
+    CHECK(NEAR(f[0].micro[MN_FIBER], 10.1f));
+    CHECK(NEAR(f[0].micro[MN_IRON], 4.3f));
+    CHECK(NEAR(f[0].micro[MN_ZINC], 3.6f));
+    CHECK(NEAR(f[0].micro[MN_SODIUM], 4.0f)); /* from salt: 0.01 g / 2.5 = 4 mg */
+    CHECK(NEAR(f[0].micro[MN_VIT_D], 2.5f));
+    CHECK(f[0].micro[MN_SUGAR] == 0);
+
+    Entry e;
+    memset(&e, 0, sizeof e);
+    e.food = f[0];
+    e.grams = 50;
+    Totals t = entry_totals(&e);
+    CHECK(NEAR(t.micro[MN_FIBER], 5.05f) && NEAR(t.micro[MN_IRON], 2.15f));
+    Entry two[2] = {e, e};
+    Totals s = sum_entries(two, 2, -1);
+    CHECK(NEAR(s.micro[MN_FIBER], 10.1f));
+
+    CHECK(micro_target(MN_FIBER, 0, 14) == 31 && micro_target(MN_IRON, 1, 14) == 15);
+    CHECK(micro_target(MN_IRON, 0, 30) == 8);
+    CHECK(micro_info(MN_SODIUM)->limit && !micro_info(MN_FIBER)->limit);
+    CHECK(strcmp(micro_info(MN_VIT_B12)->unit, "mcg") == 0);
+
+    /* barcode lookups */
+    char url[256];
+    CHECK(off_product_url("7501055363513", url, sizeof url) == 0);
+    CHECK(strstr(url, "/api/v2/product/7501055363513?fields=") != NULL);
+    CHECK(off_product_url("12ab", url, sizeof url) == -1);
+    Food p;
+    CHECK(off_parse_product("{\"code\":\"1\",\"product\":{\"product_name\":\"Cola\",\"brands\":\"Fizz\","
+                            "\"nutriments\":{\"energy-kcal_100g\":42,\"sugars_100g\":10.6}},\"status\":1}",
+                            &p) == 1);
+    CHECK(strcmp(p.name, "Cola") == 0 && strcmp(p.brand, "Fizz") == 0 && NEAR(p.micro[MN_SUGAR], 10.6f));
+    CHECK(off_parse_product("{\"code\":\"1\",\"status\":0,\"status_verbose\":\"product not found\"}", &p) == 0);
+    CHECK(off_parse_product("not json", &p) == -1);
+
+    /* micros survive the day file */
+    char dir[] = "/tmp/ct_micro_XXXXXX";
+    CHECK(mkdtemp(dir) != NULL);
+    CHECK(storage_init(dir) == 0);
+    static DayLog day, back;
+    memset(&day, 0, sizeof day);
+    ct_strlcpy(day.date, "2026-11-23", sizeof day.date);
+    CHECK(day_add(&day, &e) == 0 && day_save(&day) == 0);
+    CHECK(day_load("2026-11-23", &back) == 0 && back.count == 1);
+    CHECK(NEAR(back.entries[0].food.micro[MN_IRON], 4.3f) && back.entries[0].food.micro[MN_SUGAR] == 0);
+}
+
+/* ---- barcode helpers: draw a code as modules (1 = bar) ---- */
+static const char *L_PAT[10] = {"0001101", "0011001", "0010011", "0111101", "0100011",
+                                "0110001", "0101111", "0111011", "0110111", "0001011"};
+static const char *PARITY[10] = {"LLLLLL", "LLGLGG", "LLGGLG", "LLGGGL", "LGLLGG",
+                                 "LGGLLG", "LGGGLL", "LGLGLG", "LGLGGL", "LGGLGL"};
+
+static int ean_modules(const char *code, char *mods)
+{
+    size_t n = strlen(code);
+    int half = n == 13 ? 6 : 4;
+    const char *left = n == 13 ? code + 1 : code;
+    int m = 0;
+    strcpy(mods, "101");
+    m = 3;
+    for (int k = 0; k < half; k++) {
+        const char *pat = L_PAT[left[k] - '0'];
+        int g = n == 13 && PARITY[code[0] - '0'][k] == 'G';
+        for (int j = 0; j < 7; j++) {
+            /* G = R reversed; R = L inverted */
+            char c = g ? (pat[6 - j] == '1' ? '0' : '1') : pat[j];
+            mods[m++] = c;
+        }
+    }
+    memcpy(mods + m, "01010", 5);
+    m += 5;
+    for (int k = 0; k < half; k++) {
+        const char *pat = L_PAT[left[half + k] - '0'];
+        for (int j = 0; j < 7; j++)
+            mods[m++] = pat[j] == '1' ? '0' : '1';
+    }
+    memcpy(mods + m, "101", 3);
+    m += 3;
+    mods[m] = '\0';
+    return m;
+}
+
+/* Renders modules into a row of pixels: quiet zone, blur, uneven light, noise. */
+static int render_row(const char *mods, float px, int flip, unsigned char *row, int width, unsigned seed)
+{
+    int n = (int)strlen(mods);
+    float x0 = (width - n * px) / 2;
+    static float tmp[2000];
+    for (int x = 0; x < width; x++) {
+        float c = x + 0.5f - x0;
+        int idx = (int)(c / px);
+        int bar = c >= 0 && idx < n && mods[flip ? n - 1 - idx : idx] == '1';
+        tmp[x] = bar ? 40.0f : 210.0f;
+    }
+    for (int x = 0; x < width; x++) {
+        float a = tmp[x > 0 ? x - 1 : x], b = tmp[x], c = tmp[x + 1 < width ? x + 1 : x];
+        float v = (a + 2 * b + c) / 4;
+        v *= 0.7f + 0.3f * x / width; /* light falls off to one side */
+        seed = seed * 1103515245u + 12345u;
+        v += (float)((seed >> 16) % 21) - 10;
+        row[x] = (unsigned char)(v < 0 ? 0 : v > 255 ? 255 : v);
+    }
+    return n;
+}
+
+static void test_barcode(void)
+{
+    CHECK(barcode_check_ok("7501055363513"));
+    CHECK(!barcode_check_ok("7501055363514"));
+    CHECK(barcode_check_ok("96385074"));
+
+    const char *codes[] = {"7501055363513", "4006381333931", "0049000006346", "5901234123457", "96385074"};
+    char mods[200], out[BARCODE_LEN];
+    unsigned char row[400];
+    float scales[] = {2.0f, 2.4f, 3.1f};
+    for (size_t c = 0; c < sizeof codes / sizeof codes[0]; c++) {
+        CHECK(barcode_check_ok(codes[c]));
+        ean_modules(codes[c], mods);
+        for (int s = 0; s < 3; s++) {
+            for (int flip = 0; flip < 2; flip++) {
+                render_row(mods, scales[s], flip, row, 400, (unsigned)(c * 7 + s * 3 + flip));
+                int ok = barcode_read_row(row, 400, out);
+                CHECK(ok && strcmp(out, codes[c]) == 0);
+                if (!ok || strcmp(out, codes[c]) != 0)
+                    fprintf(stderr, "  code %s scale %.1f flip %d -> %s\n", codes[c], scales[s], flip,
+                            ok ? out : "(none)");
+            }
+        }
+    }
+    /* noise only: no false reads */
+    unsigned seed = 1;
+    int false_reads = 0;
+    for (int t = 0; t < 200; t++) {
+        for (int x = 0; x < 400; x++) {
+            seed = seed * 1103515245u + 12345u;
+            row[x] = (unsigned char)((seed >> 16) & 0xff);
+        }
+        false_reads += barcode_read_row(row, 400, out);
+    }
+    CHECK(false_reads == 0);
+
+    /* a whole picture: the code in the middle band */
+    static unsigned char img[240][400];
+    memset(img, 200, sizeof img);
+    ean_modules(codes[1], mods);
+    for (int y = 90; y < 150; y++)
+        render_row(mods, 2.5f, 0, img[y], 400, (unsigned)y);
+    CHECK(barcode_read_image(&img[0][0], 400, 240, 400, out) && strcmp(out, codes[1]) == 0);
+    memset(img, 200, sizeof img);
+    CHECK(!barcode_read_image(&img[0][0], 400, 240, 400, out));
+}
+
+static int fake_hit(const char *date, void *ctx)
+{
+    (void)ctx;
+    /* goal days on the 20th, 21st and 22nd only */
+    return strcmp(date, "2026-11-20") >= 0 && strcmp(date, "2026-11-22") <= 0;
+}
+
+static void test_goals(void)
+{
+    CHECK(goal_day(2000, 100, 2000, 100));
+    CHECK(goal_day(1850, 95, 2000, 100));
+    CHECK(!goal_day(1700, 120, 2000, 100)); /* too little food breaks it too */
+    CHECK(!goal_day(2300, 120, 2000, 100));
+    CHECK(!goal_day(2000, 80, 2000, 100));
+    CHECK(!goal_day(0, 0, 2000, 100));
+    CHECK(streak_before("2026-11-23", fake_hit, NULL, 365) == 3);
+    CHECK(streak_before("2026-11-25", fake_hit, NULL, 365) == 0);
+    CHECK(streak_before("2026-11-23", fake_hit, NULL, 2) == 2);
+
+    char dir[] = "/tmp/ct_goal_XXXXXX";
+    CHECK(mkdtemp(dir) != NULL);
+    CHECK(storage_init(dir) == 0);
+    UserProfile p;
+    CHECK(profile_load(&p) == 0 && p.water_goal == 8 && p.sounds_off == 0);
+    p.water_goal = 10;
+    p.sounds_off = 1;
+    CHECK(profile_save(&p) == 0 && profile_load(&p) == 0 && p.water_goal == 10 && p.sounds_off == 1);
+}
+
 static void test_activity(void)
 {
     long days;
@@ -367,6 +558,9 @@ int main(void)
     test_cache_full();
     test_profile();
     test_activity();
+    test_micros();
+    test_barcode();
+    test_goals();
     if (failures) {
         fprintf(stderr, "%d check(s) failed\n", failures);
         return 1;

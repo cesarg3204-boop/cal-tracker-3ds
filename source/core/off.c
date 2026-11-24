@@ -223,6 +223,19 @@ static int has_brand(const cJSON *brands, const char *brand)
 
 static int parse_products(const char *json, const char *brand_filter, Food *out, int max);
 
+static void read_micros(const cJSON *nutr, Food *f)
+{
+    for (int i = 0; i < MICRO_COUNT; i++) {
+        const MicroInfo *mi = micro_info((Micro)i);
+        float g;
+        if (get_number(nutr, mi->off_key, &g) && g > 0)
+            f->micro[i] = g * mi->from_grams;
+    }
+    float salt;
+    if (f->micro[MN_SODIUM] <= 0 && get_number(nutr, "salt_100g", &salt) && salt > 0)
+        f->micro[MN_SODIUM] = salt / 2.5f * 1000.0f; /* salt is 40% sodium */
+}
+
 int off_parse_search(const char *json, Food *out, int max)
 {
     return parse_products(json, NULL, out, max);
@@ -231,6 +244,36 @@ int off_parse_search(const char *json, Food *out, int max)
 int off_parse_brand(const char *json, const char *brand, Food *out, int max)
 {
     return parse_products(json, brand, out, max);
+}
+
+/* Fills one food from a product object. Returns 0 if it has no calories. */
+static int parse_one(const cJSON *p, const char *name, const cJSON *nutr, Food *f)
+{
+    memset(f, 0, sizeof *f);
+    if (!get_number(nutr, "energy-kcal_100g", &f->kcal)) {
+        float kj;
+        if (!get_number(nutr, "energy_100g", &kj))
+            return 0; /* no energy value: useless for a calorie tracker */
+        f->kcal = kj / 4.184f;
+    }
+    get_number(nutr, "proteins_100g", &f->protein);
+    get_number(nutr, "carbohydrates_100g", &f->carbs);
+    get_number(nutr, "fat_100g", &f->fat);
+    get_number(p, "serving_quantity", &f->serving_g);
+    read_micros(nutr, f);
+
+    ct_strlcpy(f->name, name, sizeof f->name);
+    const cJSON *brands = cJSON_GetObjectItemCaseSensitive(p, "brands");
+    if (cJSON_IsArray(brands))
+        brands = cJSON_GetArrayItem(brands, 0); /* newer API: a list of brands */
+    if (cJSON_IsString(brands)) {
+        /* keep only the first brand of a comma-separated list */
+        ct_strlcpy(f->brand, brands->valuestring, sizeof f->brand);
+        char *comma = strchr(f->brand, ',');
+        if (comma)
+            *comma = '\0';
+    }
+    return 1;
 }
 
 static int parse_products(const char *json, const char *brand_filter, Food *out, int max)
@@ -267,31 +310,41 @@ static int parse_products(const char *json, const char *brand_filter, Food *out,
         }
 
         Food f;
-        memset(&f, 0, sizeof f);
-        if (!get_number(nutr, "energy-kcal_100g", &f.kcal)) {
-            float kj;
-            if (!get_number(nutr, "energy_100g", &kj))
-                continue; /* no energy value: useless for a calorie tracker */
-            f.kcal = kj / 4.184f;
-        }
-        get_number(nutr, "proteins_100g", &f.protein);
-        get_number(nutr, "carbohydrates_100g", &f.carbs);
-        get_number(nutr, "fat_100g", &f.fat);
-        get_number(p, "serving_quantity", &f.serving_g);
-
-        ct_strlcpy(f.name, name, sizeof f.name);
-        const cJSON *brands = cJSON_GetObjectItemCaseSensitive(p, "brands");
-        if (cJSON_IsArray(brands))
-            brands = cJSON_GetArrayItem(brands, 0); /* newer API: a list of brands */
-        if (cJSON_IsString(brands)) {
-            /* keep only the first brand of a comma-separated list */
-            ct_strlcpy(f.brand, brands->valuestring, sizeof f.brand);
-            char *comma = strchr(f.brand, ',');
-            if (comma)
-                *comma = '\0';
-        }
+        if (!parse_one(p, name, nutr, &f))
+            continue;
         out[n++] = f;
     }
     cJSON_Delete(root);
     return n;
+}
+
+int off_product_url(const char *barcode, char *out, size_t size)
+{
+    size_t len = strlen(barcode);
+    if (len < 8 || len > 14)
+        return -1;
+    for (size_t i = 0; i < len; i++)
+        if (barcode[i] < '0' || barcode[i] > '9')
+            return -1;
+    int n = snprintf(out, size, "https://world.openfoodfacts.org/api/v2/product/%s?fields=" OFF_FIELDS, barcode);
+    return (n < 0 || (size_t)n >= size) ? -1 : 0;
+}
+
+int off_parse_product(const char *json, Food *out)
+{
+    cJSON *root = cJSON_Parse(json);
+    if (!root)
+        return -1;
+    int rc = 0;
+    const cJSON *p = cJSON_GetObjectItemCaseSensitive(root, "product");
+    if (cJSON_IsObject(p)) {
+        const char *name = first_name(p);
+        const cJSON *nutr = cJSON_GetObjectItemCaseSensitive(p, "nutriments");
+        if (!name)
+            name = "Scanned product";
+        if (cJSON_IsObject(nutr) && parse_one(p, name, nutr, out))
+            rc = 1;
+    }
+    cJSON_Delete(root);
+    return rc;
 }

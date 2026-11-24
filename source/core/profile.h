@@ -24,6 +24,8 @@ typedef struct {
     float height_cm;  /* 0 if unknown */
     float body_fat;   /* percent, 0 if unknown */
     Activity activity;
+    int water_goal; /* glasses of 250 ml a day */
+    int sounds_off; /* 0: sounds on */
 } UserProfile;
 
 /* One number per date: body weight (weights.json) or steps (steps.json,
@@ -31,6 +33,7 @@ typedef struct {
 #define CT_MAX_SERIES 400
 #define WEIGHTS_FILE "weights.json"
 #define STEPS_FILE "steps.json"
+#define WATER_FILE "water.json" /* glasses per day */
 
 typedef struct {
     char date[CT_DATE_LEN];
@@ -52,6 +55,14 @@ float bmi(float kg, float height_cm);
 float bmr(const UserProfile *p, float kg);
 
 /* Uses the folder set by storage_init(). Missing files give defaults. */
+/* A "goal day": calories within 10% of the target (not too little either)
+ * and protein at least 90% of its target. */
+int goal_day(float kcal, float protein, float kcal_target, float protein_target);
+
+/* Days in a row that were goal days, ending the day before `today`
+ * (today still counts once it is a goal day). `hit` reports one day. */
+int streak_before(const char *today, int (*hit)(const char *date, void *ctx), void *ctx, int max_days);
+
 int profile_load(UserProfile *p);
 int profile_save(const UserProfile *p);
 
