@@ -549,6 +549,19 @@ static void test_activity(void)
     CHECK(workouts_load("2026-11-24", &other) == 0 && other.count == 1);
 }
 
+static void test_typed_codes(void)
+{
+    char out[BARCODE_LEN];
+    CHECK(barcode_from_typed(CODE_EAN13, "4006381333931", out) == 1 && strcmp(out, "4006381333931") == 0);
+    CHECK(barcode_from_typed(CODE_EAN13, "4 006381 333931", out) == 1);
+    CHECK(barcode_from_typed(CODE_EAN13, "4006381333932", out) == -1); /* typo */
+    CHECK(barcode_from_typed(CODE_EAN13, "400638133393", out) == 0);   /* 12 digits */
+    CHECK(barcode_from_typed(CODE_UPCA, "036000291452", out) == 1 && strcmp(out, "0036000291452") == 0);
+    CHECK(barcode_from_typed(CODE_EAN8, "96385074", out) == 1 && strcmp(out, "96385074") == 0);
+    CHECK(barcode_from_typed(CODE_EAN8, "9638507x", out) == 0);
+    CHECK(code_type_digits(CODE_UPCA) == 12);
+}
+
 static void test_servings(void)
 {
     char label[CT_SERVING_LEN];
@@ -632,6 +645,7 @@ int main(void)
     test_barcode();
     test_goals();
     test_servings();
+    test_typed_codes();
     if (failures) {
         fprintf(stderr, "%d check(s) failed\n", failures);
         return 1;

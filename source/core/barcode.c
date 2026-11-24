@@ -15,6 +15,43 @@ static const unsigned char L_CODE[10][4] = {
  * (bit 5 = first left digit, 1 = G). */
 static const unsigned char FIRST_DIGIT[10] = {0x00, 0x0B, 0x0D, 0x0E, 0x13, 0x19, 0x1C, 0x15, 0x16, 0x1A};
 
+const char *const CODE_TYPE_NAMES[CODE_TYPE_COUNT] = {
+    "EAN-13  (13 digits, most products)",
+    "UPC-A  (12 digits, US products)",
+    "EAN-8  (8 digits, small packs)",
+};
+
+int code_type_digits(CodeType type)
+{
+    static const int digits[CODE_TYPE_COUNT] = {13, 12, 8};
+    return type >= 0 && type < CODE_TYPE_COUNT ? digits[type] : 0;
+}
+
+int barcode_from_typed(CodeType type, const char *typed, char out[BARCODE_LEN])
+{
+    char d[BARCODE_LEN];
+    int n = 0;
+    for (const char *p = typed; *p; p++) {
+        if (*p >= '0' && *p <= '9') {
+            if (n >= 13)
+                return 0;
+            d[n++] = *p;
+        } else if (*p != ' ' && *p != '-') {
+            return 0;
+        }
+    }
+    d[n] = '\0';
+    if (n != code_type_digits(type))
+        return 0;
+    if (type == CODE_UPCA) {
+        out[0] = '0';
+        memcpy(out + 1, d, 13);
+    } else {
+        memcpy(out, d, (size_t)n + 1);
+    }
+    return barcode_check_ok(out) ? 1 : -1;
+}
+
 int barcode_check_ok(const char *d)
 {
     size_t n = strlen(d);
