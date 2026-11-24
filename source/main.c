@@ -15,12 +15,14 @@
 #include <string.h>
 #include <time.h>
 
+#include "core/activity.h"
 #include "core/date.h"
 #include "core/food.h"
 #include "core/off.h"
 #include "core/profile.h"
 #include "core/storage.h"
 #include "net.h"
+#include "pedometer.h"
 
 #define DATA_DIR "sdmc:/3ds/caltracker" /* shared with the plain Cal Tracker */
 #define TOP_W 400.0f
@@ -75,8 +77,8 @@ static u32 grad(float t)
 typedef enum { TAB_TODAY, TAB_SEARCH, TAB_BRANDS, TAB_FAVS, TAB_MEALS, TAB_PROFILE, TAB_COUNT } Tab;
 static const char *TAB_NAMES[TAB_COUNT] = {"Today", "Search", "Brands", "Favs", "Meals", "Profile"};
 
-typedef enum { PAGE_PROFILE, PAGE_REPORT, PAGE_CHARTS, PAGE_COUNT } Page;
-static const char *PAGE_NAMES[PAGE_COUNT] = {"Profile", "Report", "Charts"};
+typedef enum { PAGE_PROFILE, PAGE_ACTIVITY, PAGE_REPORT, PAGE_CHARTS, PAGE_COUNT } Page;
+static const char *PAGE_NAMES[PAGE_COUNT] = {"Profile", "Activity", "Report", "Charts"};
 
 typedef enum {
     PR_AGE,
@@ -85,7 +87,6 @@ typedef enum {
     PR_HEIGHT,
     PR_BMI,
     PR_BODY_FAT,
-    PR_ACTIVITY,
     PR_KCAL,
     PR_PROTEIN,
     PR_CARBS,
@@ -119,11 +120,15 @@ typedef enum {
     ACT_SAVE_DRAFT,
     ACT_CANCEL_DRAFT,
     ACT_PAGE_PROFILE,
+    ACT_PAGE_ACTIVITY,
     ACT_PAGE_REPORT,
     ACT_PAGE_CHARTS,
     ACT_EDIT_ROW,
     ACT_LOG_WEIGHT,
-    ACT_EXERCISE,
+    ACT_ADD_WORKOUT,
+    ACT_REMOVE_WORKOUT,
+    ACT_PICK_CHOOSE,
+    ACT_PICK_CANCEL,
     ACT_PREV_WEEK,
     ACT_NEXT_WEEK,
 } Action;
@@ -147,7 +152,16 @@ static FavList g_favs;
 static MealList g_meals;
 static BrandList g_brands;
 static UserProfile g_profile;
-static Series g_weights, g_exercise;
+static Series g_weights, g_steps;
+
+/* Activity for the viewed day: steps from the 3DS and typed-in workouts. */
+static uint16_t g_step_hours[24];
+static unsigned g_step_total = 0;
+static bool g_steps_live = false; /* read from the pedometer, not the saved copy */
+static WorkoutDay g_workouts;
+static int g_workout_sel = 0;
+static bool g_picking = false; /* choosing a workout type */
+static int g_pick_sel = 0;
 static char g_today[CT_DATE_LEN];
 
 static Tab g_tab = TAB_TODAY;
@@ -325,6 +339,28 @@ static void reset_list(Tab t)
     g_scroll[t] = 0;
 }
 
+/* Re-reads steps and workouts for the viewed day. Steps that the
+ * pedometer reports are saved, so days it has forgotten still show. */
+static void refresh_activity(void)
+{
+    unsigned total = 0;
+    g_steps_live = pedometer_day(g_day.date, g_step_hours, &total) == 0 && total > 0;
+    if (g_steps_live) {
+        if ((unsigned)series_get(&g_steps, g_day.date) != total) {
+            series_set(&g_steps, g_day.date, (float)total);
+            series_save(&g_steps, STEPS_FILE);
+        }
+    } else {
+        memset(g_step_hours, 0, sizeof g_step_hours);
+        total = (unsigned)series_get(&g_steps, g_day.date);
+    }
+    g_step_total = total;
+    if (strcmp(g_workouts.date, g_day.date) != 0) {
+        workouts_load(g_day.date, &g_workouts);
+        g_workout_sel = 0;
+    }
+}
+
 static void load_day(const char *date)
 {
     if (day_load(date, &g_day) != 0)
@@ -332,6 +368,7 @@ static void load_day(const char *date)
     rebuild_order();
     reset_list(TAB_TODAY);
     g_week_dirty = true;
+    refresh_activity();
 }
 
 static void save_day(void)
@@ -682,6 +719,9 @@ static void log_saved_meal(const SavedMeal *m, float factor)
 
 static void switch_tab(Tab t)
 {
+    g_picking = false;
+    if (t == TAB_PROFILE && g_tab != TAB_PROFILE)
+        refresh_activity();
     g_tab = t;
     if (g_status[0] == 'L' && strncmp(g_status, "Loading", 7) == 0)
         g_status[0] = '\0';
@@ -777,10 +817,6 @@ static void edit_profile_row(ProfileRow row)
             save_profile();
         }
         break;
-    case PR_ACTIVITY:
-        p->activity = (Activity)((p->activity + 1) % ACTIVITY_COUNT);
-        save_profile();
-        break;
     case PR_KCAL: edit_target("Daily calories", &g_targets.kcal); break;
     case PR_PROTEIN: edit_target("Daily protein (g)", &g_targets.protein); break;
     case PR_CARBS: edit_target("Daily carbs (g)", &g_targets.carbs); break;
@@ -789,18 +825,46 @@ static void edit_profile_row(ProfileRow row)
     }
 }
 
-static void log_exercise(void)
+static float weight_for_day(void)
 {
-    float kcal = series_get(&g_exercise, g_day.date);
-    if (!prompt_number("Exercise calories for this day (0 = none)", kcal, &kcal))
+    float kg = series_latest(&g_weights, g_day.date);
+    return kg > 0 ? kg : current_weight();
+}
+
+static void add_workout(const WorkoutType *type)
+{
+    Workout w;
+    memset(&w, 0, sizeof w);
+    if (type->met > 0) {
+        float kg = weight_for_day();
+        if (kg <= 0) {
+            status("Log your weight in Profile first");
+            return;
+        }
+        float minutes = 45;
+        if (!prompt_number("How many minutes?", minutes, &minutes) || minutes <= 0)
+            return;
+        ct_strlcpy(w.name, type->name, sizeof w.name);
+        w.minutes = minutes;
+        w.kcal = workout_kcal(type->met, kg, minutes);
+    } else {
+        if (!prompt_text("Workout name (e.g. Boxing)", NULL, w.name, sizeof w.name))
+            return;
+        float kcal = 0;
+        if (!prompt_number("Calories burned", kcal, &kcal) || kcal <= 0)
+            return;
+        w.kcal = kcal;
+    }
+    if (workouts_add(&g_workouts, &w) != 0) {
+        status("Up to %d workouts a day", CT_MAX_WORKOUTS);
         return;
-    series_set(&g_exercise, g_day.date, kcal);
-    if (series_save(&g_exercise, EXERCISE_FILE) != 0)
-        status("Could not save exercise");
-    else if (kcal > 0)
-        status("Exercise: %.0f kcal on %s", kcal, g_day.date);
+    }
+    g_picking = false;
+    g_workout_sel = (int)g_workouts.count - 1;
+    if (workouts_save(&g_workouts) != 0)
+        status("Could not save the workout");
     else
-        status("No exercise on %s", g_day.date);
+        status("Added %.20s: %.0f kcal", w.name, w.kcal);
 }
 
 static void shift_day(int days)
@@ -853,6 +917,7 @@ static void do_action(Action a)
         status("Meal not saved");
         break;
     case ACT_PAGE_PROFILE: g_page = PAGE_PROFILE; break;
+    case ACT_PAGE_ACTIVITY: g_page = PAGE_ACTIVITY; break;
     case ACT_PAGE_REPORT: g_page = PAGE_REPORT; break;
     case ACT_PAGE_CHARTS: g_page = PAGE_CHARTS; break;
     case ACT_EDIT_ROW:
@@ -862,8 +927,25 @@ static void do_action(Action a)
     case ACT_LOG_WEIGHT:
         log_weight();
         break;
-    case ACT_EXERCISE:
-        log_exercise();
+    case ACT_ADD_WORKOUT:
+        g_picking = true;
+        g_pick_sel = 0;
+        break;
+    case ACT_PICK_CANCEL:
+        g_picking = false;
+        break;
+    case ACT_PICK_CHOOSE:
+        if (g_picking)
+            add_workout(&WORKOUT_TYPES[g_pick_sel]);
+        break;
+    case ACT_REMOVE_WORKOUT:
+        if (g_workouts.count > 0) {
+            status("Removed %.24s", g_workouts.items[g_workout_sel].name);
+            workouts_remove(&g_workouts, (size_t)g_workout_sel);
+            workouts_save(&g_workouts);
+            if (g_workout_sel >= (int)g_workouts.count && g_workout_sel > 0)
+                g_workout_sel--;
+        }
         break;
     case ACT_DELETE:
         if (t == TAB_TODAY && count > 0) {
@@ -1042,15 +1124,30 @@ static bool handle_keys(u32 down)
 
     /* Profile: Left/Right change page */
     if (t == TAB_PROFILE) {
+        if (g_picking) {
+            int dummy = 0;
+            if (down & KEY_DUP) move_sel(&g_pick_sel, &dummy, -1, WORKOUT_TYPE_COUNT, WORKOUT_TYPE_COUNT);
+            if (down & KEY_DDOWN) move_sel(&g_pick_sel, &dummy, 1, WORKOUT_TYPE_COUNT, WORKOUT_TYPE_COUNT);
+            if (down & KEY_A) do_action(ACT_PICK_CHOOSE);
+            if (down & KEY_B) do_action(ACT_PICK_CANCEL);
+            return true;
+        }
         if (down & KEY_DLEFT) g_page = (Page)((g_page + PAGE_COUNT - 1) % PAGE_COUNT);
         if (down & KEY_DRIGHT) g_page = (Page)((g_page + 1) % PAGE_COUNT);
-        if (g_page == PAGE_PROFILE) {
+        if (g_page == PAGE_ACTIVITY) {
+            int dummy = 0, n = (int)g_workouts.count;
+            if (down & KEY_DUP) move_sel(&g_workout_sel, &dummy, -1, n, n);
+            if (down & KEY_DDOWN) move_sel(&g_workout_sel, &dummy, 1, n, n);
+            if (down & KEY_A) do_action(ACT_ADD_WORKOUT);
+            if (down & KEY_X) do_action(ACT_REMOVE_WORKOUT);
+            if (down & KEY_Y) do_action(ACT_PREV_DAY);
+            if (down & KEY_B) do_action(ACT_TODAY);
+        } else if (g_page == PAGE_PROFILE) {
             if (down & KEY_DUP) move_sel(&g_sel[t], &g_scroll[t], -1, PR_COUNT, PR_COUNT);
             if (down & KEY_DDOWN) move_sel(&g_sel[t], &g_scroll[t], 1, PR_COUNT, PR_COUNT);
             if (down & KEY_A) do_action(ACT_EDIT_ROW);
             if (down & KEY_Y) do_action(ACT_LOG_WEIGHT);
         } else if (g_page == PAGE_REPORT) {
-            if (down & KEY_A) do_action(ACT_EXERCISE);
             if (down & KEY_Y) do_action(ACT_PREV_DAY);
             if (down & KEY_X) do_action(ACT_NEXT_DAY);
             if (down & KEY_B) do_action(ACT_TODAY);
@@ -1181,16 +1278,28 @@ static void layout_buttons(void)
         }
         break;
     case TAB_PROFILE: {
-        static const Action pages[PAGE_COUNT] = {ACT_PAGE_PROFILE, ACT_PAGE_REPORT, ACT_PAGE_CHARTS};
-        float xs[3] = {x0, x1, x2};
+        if (g_picking) {
+            add_button(x0, r1, w3, BTN_H, "A  Choose", C_GRAD, ACT_PICK_CHOOSE);
+            add_button(x1, r1, w3, BTN_H, "B  Cancel", C_PANEL2, ACT_PICK_CANCEL);
+            break;
+        }
+        static const Action pages[PAGE_COUNT] = {ACT_PAGE_PROFILE, ACT_PAGE_ACTIVITY, ACT_PAGE_REPORT,
+                                                 ACT_PAGE_CHARTS};
+        float w4 = (BOT_W - 8 * 5) / 4;
         for (int i = 0; i < PAGE_COUNT; i++)
-            add_button(xs[i], r0, w3, BTN_H, PAGE_NAMES[i], i == (int)g_page ? C_GRAD : C_PANEL2, pages[i]);
-        if (g_page == PAGE_PROFILE) {
+            add_button(8 + i * (w4 + 8), r0, w4, BTN_H, PAGE_NAMES[i], i == (int)g_page ? C_GRAD : C_PANEL2,
+                       pages[i]);
+        if (g_page == PAGE_ACTIVITY) {
+            add_button(8, r1, w4, BTN_H, "Y  < Day", C_PANEL2, ACT_PREV_DAY);
+            add_button(8 + (w4 + 8), r1, w4, BTN_H, "A  Workout", C_GRAD, ACT_ADD_WORKOUT);
+            add_button(8 + 2 * (w4 + 8), r1, w4, BTN_H, "X  Remove", C_PANEL2, ACT_REMOVE_WORKOUT);
+            add_button(8 + 3 * (w4 + 8), r1, w4, BTN_H, "Day >", C_PANEL2, ACT_NEXT_DAY);
+        } else if (g_page == PAGE_PROFILE) {
             add_button(x0, r1, w3, BTN_H, "A  Change", C_GRAD, ACT_EDIT_ROW);
             add_button(x1, r1, w3, BTN_H, "Y  Log weight", C_GRAD, ACT_LOG_WEIGHT);
         } else if (g_page == PAGE_REPORT) {
             add_button(x0, r1, w3, BTN_H, "Y  < Day", C_PANEL2, ACT_PREV_DAY);
-            add_button(x1, r1, w3, BTN_H, "A  Exercise", C_GRAD, ACT_EXERCISE);
+            add_button(x1, r1, w3, BTN_H, "B  Today", C_PANEL2, ACT_TODAY);
             add_button(x2, r1, w3, BTN_H, "X  Day >", C_PANEL2, ACT_NEXT_DAY);
         } else {
             add_button(x0, r1, w3, BTN_H, "Y  < Week", C_PANEL2, ACT_PREV_WEEK);
@@ -1504,8 +1613,8 @@ static void draw_top_meals(void)
 }
 
 /* ---- profile, report, charts ------------------------------------------- */
-static const char *ROW_LABELS[PR_COUNT] = {"Age", "Sex", "Weight", "Height", "BMI", "Body fat",
-                                           "Activity", "Calories", "Protein", "Carbs", "Fat"};
+static const char *ROW_LABELS[PR_COUNT] = {"Age",      "Sex",     "Weight", "Height", "BMI",
+                                           "Body fat", "Calories", "Protein", "Carbs", "Fat"};
 
 static float profile_row_y(int row)
 {
@@ -1540,7 +1649,6 @@ static void profile_value(ProfileRow row, char *out, size_t size)
         if (p->body_fat > 0) snprintf(out, size, "%.0f %%", p->body_fat);
         else snprintf(out, size, "not set");
         break;
-    case PR_ACTIVITY: snprintf(out, size, "%s", activity_name(p->activity)); break;
     case PR_KCAL: snprintf(out, size, "%.0f kcal", g_targets.kcal); break;
     case PR_PROTEIN: snprintf(out, size, "%.0f g", g_targets.protein); break;
     case PR_CARBS: snprintf(out, size, "%.0f g", g_targets.carbs); break;
@@ -1573,18 +1681,16 @@ static void draw_page_report(void)
     char title[48];
     snprintf(title, sizeof title, "Report  -  %s", g_day.date);
     header(title, "< >");
-    float kg = series_latest(&g_weights, g_day.date);
-    if (kg <= 0)
-        kg = current_weight();
+    float kg = weight_for_day();
     float rest = bmr(&g_profile, kg);
     if (rest <= 0) {
         empty_card("Fill in your profile first", "Age, height and a weight are needed");
         return;
     }
     Totals t = sum_entries(g_day.entries, g_day.count, -1);
-    float basic = rest * (activity_factor(g_profile.activity) - 1.0f);
-    float exercise = series_get(&g_exercise, g_day.date);
-    float burned = rest + basic + exercise;
+    float steps = steps_kcal(g_step_total, kg, g_profile.height_cm);
+    float workouts = workouts_total(&g_workouts);
+    float burned = rest + steps + workouts;
 
     /* two big numbers */
     float cw = (TOP_W - 30) / 2;
@@ -1612,11 +1718,11 @@ static void draw_page_report(void)
     text(20, y, 0.45f, C_MUTED, 0, "Resting (BMR)");
     text(TOP_W - 12, y, 0.45f, C_TEXT, C2D_AlignRight, "%.0f kcal", rest);
     y += 14;
-    text(20, y, 0.45f, C_MUTED, 0, "Basic activity (%s)", activity_name(g_profile.activity));
-    text(TOP_W - 12, y, 0.45f, C_TEXT, C2D_AlignRight, "%.0f kcal", basic);
+    text(20, y, 0.45f, C_MUTED, 0, "Steps (%u)", g_step_total);
+    text(TOP_W - 12, y, 0.45f, C_TEXT, C2D_AlignRight, "%.0f kcal", steps);
     y += 14;
-    text(20, y, 0.45f, C_MUTED, 0, "Exercise");
-    text(TOP_W - 12, y, 0.45f, C_TEXT, C2D_AlignRight, "%.0f kcal", exercise);
+    text(20, y, 0.45f, C_MUTED, 0, "Workouts (%d)", (int)g_workouts.count);
+    text(TOP_W - 12, y, 0.45f, C_TEXT, C2D_AlignRight, "%.0f kcal", workouts);
 
     /* where the eaten energy came from */
     y += 20;
@@ -1750,10 +1856,91 @@ static void draw_page_charts(void)
     }
 }
 
+static void draw_workout_picker(void)
+{
+    header("Add a workout", NULL);
+    float kg = weight_for_day();
+    for (int i = 0; i < WORKOUT_TYPE_COUNT; i++) {
+        float y = 28 + i * 17;
+        bool on = i == g_pick_sel;
+        if (on) {
+            rrect(4, y - 1, TOP_W - 8, 16, 5, C_PANEL2);
+            C2D_DrawRectSolid(4, y - 1, 0.45f, 3, 16, grad((float)i / (WORKOUT_TYPE_COUNT - 1)));
+        }
+        const WorkoutType *t = &WORKOUT_TYPES[i];
+        text(16, y, TEXT_SCALE, C_TEXT, 0, "%s", t->name);
+        if (t->met > 0 && kg > 0)
+            text(TOP_W - 12, y, TEXT_SCALE, C_MUTED, C2D_AlignRight, "about %.0f kcal / hour",
+                 workout_kcal(t->met, kg, 60));
+    }
+}
+
+static void draw_page_activity(void)
+{
+    if (g_picking) {
+        draw_workout_picker();
+        return;
+    }
+    char title[48];
+    snprintf(title, sizeof title, "Activity  -  %s", g_day.date);
+    header(title, "< >");
+    float kg = weight_for_day();
+
+    /* steps card with an hourly chart */
+    rrect(8, 28, TOP_W - 16, 88, 10, C_PANEL);
+    grad_rect(20, 28, TOP_W - 40, 3, 0, 1);
+    text(18, 36, 0.45f, C_MUTED, 0, "Steps");
+    text(18, 50, 0.8f, C_TEXT, 0, "%u", g_step_total);
+    if (kg > 0) {
+        text(TOP_W - 18, 36, 0.45f, C_MUTED, C2D_AlignRight, "about");
+        text(TOP_W - 18, 50, 0.7f, C_TURQ, C2D_AlignRight, "%.0f kcal",
+             steps_kcal(g_step_total, kg, g_profile.height_cm));
+    } else {
+        text(TOP_W - 18, 52, 0.45f, C_MUTED, C2D_AlignRight, "Log a weight to see kcal");
+    }
+    unsigned top = 1;
+    for (int h = 0; h < 24; h++)
+        if (g_step_hours[h] > top) top = g_step_hours[h];
+    float cx = 18, cw = (TOP_W - 36) / 24, base = 108, ch = 26;
+    if (g_steps_live) {
+        for (int h = 0; h < 24; h++) {
+            float bh = ch * g_step_hours[h] / top;
+            if (bh > 0)
+                C2D_DrawRectSolid(cx + h * cw + 1, base - bh, 0.4f, cw - 2, bh, grad(h / 23.0f));
+            else
+                C2D_DrawRectSolid(cx + h * cw + 1, base - 1, 0.4f, cw - 2, 1, C_BAR_BG);
+        }
+        text(cx, base + 1, 0.32f, C_MUTED, 0, "12am");
+        text(cx + 12 * cw, base + 1, 0.32f, C_MUTED, 0, "12pm");
+    } else {
+        text(TOP_W / 2, 86, 0.42f, C_MUTED, C2D_AlignCenter,
+             pedometer_available() ? "No steps counted for this day" : "Step counter not available here");
+    }
+
+    /* workouts */
+    text(10, 124, 0.5f, C_TEXT, 0, "Workouts");
+    text(TOP_W - 12, 124, 0.45f, C_TURQ, C2D_AlignRight, "%.0f kcal", workouts_total(&g_workouts));
+    if (g_workouts.count == 0) {
+        text(TOP_W / 2, 160, 0.45f, C_MUTED, C2D_AlignCenter, "A to add one: weights, running, soccer...");
+        return;
+    }
+    int first = g_workout_sel > 5 ? g_workout_sel - 5 : 0; /* 6 rows fit */
+    for (int i = first; i < (int)g_workouts.count && i < first + 6; i++) {
+        const Workout *w = &g_workouts.items[i];
+        char right[32];
+        if (w->minutes > 0)
+            snprintf(right, sizeof right, "%.0f min  %.0f kcal", w->minutes, w->kcal);
+        else
+            snprintf(right, sizeof right, "%.0f kcal", w->kcal);
+        food_row(142 + (i - first) * ROW_H, i == g_workout_sel, w->name, NULL, false, right, C_GREEN);
+    }
+}
+
 static void draw_top_profile(void)
 {
     switch (g_page) {
     case PAGE_PROFILE: draw_page_profile(); break;
+    case PAGE_ACTIVITY: draw_page_activity(); break;
     case PAGE_REPORT: draw_page_report(); break;
     default: draw_page_charts(); break;
     }
@@ -1820,7 +2007,6 @@ static const char *ROW_HELP[PR_COUNT] = {
     "In centimeters",
     "Worked out from weight and height",
     "Optional, in percent",
-    "A cycles: how active a normal day is",
     "Your daily calorie goal",
     "Your daily protein goal",
     "Your daily carbs goal",
@@ -1833,7 +2019,14 @@ static void draw_profile_details(void)
         int row = g_sel[TAB_PROFILE];
         hint_card(ROW_LABELS[row], ROW_HELP[row]);
     } else if (g_page == PAGE_REPORT) {
-        hint_card("Eaten vs burned", "Burned = resting + basic activity + exercise");
+        hint_card("Eaten vs burned", "Burned = resting + steps + workouts");
+    } else if (g_page == PAGE_ACTIVITY) {
+        if (g_picking)
+            hint_card("Pick a workout", "Calories use your weight and the minutes");
+        else if (!pedometer_available())
+            hint_card("Step counter not available", "Workouts still count");
+        else
+            hint_card("Steps come from your 3DS", "Carry it closed or in sleep mode");
     } else {
         if (g_week_dirty)
             compute_week();
@@ -1983,7 +2176,8 @@ int main(void)
     brands_load(&g_brands);
     profile_load(&g_profile);
     series_load(&g_weights, WEIGHTS_FILE);
-    series_load(&g_exercise, EXERCISE_FILE);
+    series_load(&g_steps, STEPS_FILE);
+    pedometer_init();
     date_today(g_today);
     load_day(g_today);
     g_slot = meal_for_now();
@@ -1992,6 +2186,10 @@ int main(void)
 
     while (aptMainLoop()) {
         hidScanInput();
+        /* steps keep coming in while the app is open */
+        static unsigned frames = 0;
+        if (++frames % 600 == 0 && g_tab == TAB_PROFILE && !g_picking)
+            refresh_activity();
         u32 down = hidKeysDown();
         layout_buttons();
         if (!handle_keys(down))
@@ -2029,6 +2227,7 @@ int main(void)
 
     C2D_TextBufDelete(g_textbuf);
     net_exit();
+    pedometer_exit();
     C2D_Fini();
     C3D_Fini();
     gfxExit();

@@ -47,6 +47,15 @@ int date_add_days(const char *date, int delta, char out[CT_DATE_LEN])
     return 0;
 }
 
+int date_to_days(const char *date, long *days)
+{
+    int y, m, d;
+    if (sscanf(date, "%4d-%2d-%2d", &y, &m, &d) != 3 || m < 1 || m > 12 || d < 1 || d > 31)
+        return -1;
+    *days = days_from_civil(y, (unsigned)m, (unsigned)d);
+    return 0;
+}
+
 void date_today(char out[CT_DATE_LEN])
 {
     time_t now = time(NULL);

@@ -9,20 +9,6 @@
 #include "food.h"
 #include "storage.h"
 
-static const char *ACTIVITY_NAMES[ACTIVITY_COUNT] = {"Sedentary", "Lightly active", "Moderately active",
-                                                     "Active", "Very active"};
-static const float ACTIVITY_FACTORS[ACTIVITY_COUNT] = {1.2f, 1.375f, 1.5f, 1.725f, 1.9f};
-
-const char *activity_name(Activity a)
-{
-    return (a >= 0 && a < ACTIVITY_COUNT) ? ACTIVITY_NAMES[a] : "?";
-}
-
-float activity_factor(Activity a)
-{
-    return (a >= 0 && a < ACTIVITY_COUNT) ? ACTIVITY_FACTORS[a] : 1.2f;
-}
-
 float bmi(float kg, float height_cm)
 {
     if (kg <= 0 || height_cm <= 0)
@@ -92,7 +78,6 @@ static float num(const cJSON *obj, const char *key)
 int profile_load(UserProfile *p)
 {
     memset(p, 0, sizeof *p);
-    p->activity = ACTIVITY_MODERATE;
     char path[300];
     storage_path(path, sizeof path, "profile.json");
     char *text = read_all(path);
@@ -106,8 +91,6 @@ int profile_load(UserProfile *p)
     p->sex = num(root, "sex") >= 1 ? SEX_FEMALE : SEX_MALE;
     p->height_cm = num(root, "height_cm");
     p->body_fat = num(root, "body_fat");
-    int a = (int)num(root, "activity");
-    p->activity = (a >= 0 && a < ACTIVITY_COUNT) ? (Activity)a : ACTIVITY_MODERATE;
     cJSON_Delete(root);
     return 0;
 }
@@ -119,7 +102,6 @@ int profile_save(const UserProfile *p)
     cJSON_AddNumberToObject(root, "sex", p->sex);
     cJSON_AddNumberToObject(root, "height_cm", p->height_cm);
     cJSON_AddNumberToObject(root, "body_fat", p->body_fat);
-    cJSON_AddNumberToObject(root, "activity", p->activity);
     char path[300];
     storage_path(path, sizeof path, "profile.json");
     return write_all(path, root);

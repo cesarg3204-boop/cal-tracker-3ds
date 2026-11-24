@@ -4,6 +4,7 @@
 #include <stdlib.h>
 #include <string.h>
 
+#include "../source/core/activity.h"
 #include "../source/core/date.h"
 #include "../source/core/food.h"
 #include "../source/core/off.h"
@@ -264,22 +265,18 @@ static void test_profile(void)
     p.sex = SEX_MALE;
     p.height_cm = 170;
     p.body_fat = 15;
-    p.activity = ACTIVITY_LIGHT;
     /* Matches Cronometer: 10*53 + 6.25*170 - 5*14 + 5 = 1527.5 */
     CHECK(fabsf(bmr(&p, 53) - 1527.5f) < 0.1f);
     CHECK(fabsf(bmi(53, 170) - 18.34f) < 0.01f);
     CHECK(bmi(0, 170) == 0 && bmr(&p, 0) == 0);
     p.sex = SEX_FEMALE;
     CHECK(fabsf(bmr(&p, 53) - 1361.5f) < 0.1f);
-    CHECK(activity_factor(ACTIVITY_SEDENTARY) < activity_factor(ACTIVITY_VERY_ACTIVE));
-    /* Cronometer's default "basic activity" is half of BMR */
-    CHECK(NEAR(activity_factor(ACTIVITY_MODERATE), 1.5f));
 
     char dir[] = "/tmp/ct_prof_XXXXXX";
     CHECK(mkdtemp(dir) != NULL);
     CHECK(storage_init(dir) == 0);
     UserProfile q;
-    CHECK(profile_load(&q) == 0 && q.age == 0 && q.activity == ACTIVITY_MODERATE);
+    CHECK(profile_load(&q) == 0 && q.age == 0);
     CHECK(profile_save(&p) == 0);
     CHECK(profile_load(&q) == 0);
     CHECK(q.age == 14 && q.sex == SEX_FEMALE && NEAR(q.height_cm, 170) && NEAR(q.body_fat, 15));
@@ -301,7 +298,60 @@ static void test_profile(void)
     CHECK(series_load(&log2, WEIGHTS_FILE) == 0 && log2.count == 3 && NEAR(log2.items[2].value, 53.0f));
     series_set(&log2, "2026-11-15", 0);
     CHECK(log2.count == 2 && series_get(&log2, "2026-11-15") == 0);
-    CHECK(series_load(&log, EXERCISE_FILE) == 0 && log.count == 0);
+    CHECK(series_load(&log, STEPS_FILE) == 0 && log.count == 0);
+}
+
+static void test_activity(void)
+{
+    long days;
+    CHECK(date_to_days("1970-01-02", &days) == 0 && days == 1);
+    CHECK(date_to_days("nope", &days) == -1);
+    long long ms;
+    CHECK(date_pedometer_ms("2000-01-01", &ms) == 0 && ms == 0);
+    CHECK(date_pedometer_ms("2000-01-02", &ms) == 0 && ms == 86400000LL);
+
+    /* 10,000 steps at 170 cm: 70.4 cm stride, 7.04 km, 0.5 * 53 * 7.04 = 186.6 */
+    CHECK(fabsf(steps_kcal(10000, 53, 170) - 186.56f) < 0.1f);
+    CHECK(fabsf(steps_kcal(1000, 70, 0) - 24.5f) < 0.01f); /* default 70 cm stride */
+    CHECK(steps_kcal(5000, 0, 170) == 0);
+
+    /* an hour of weights (MET 5) at 53 kg: (5 - 1) * 53 = 212 */
+    CHECK(NEAR(workout_kcal(5.0f, 53, 60), 212.0f));
+    CHECK(NEAR(workout_kcal(9.8f, 53, 30), 233.2f));
+    CHECK(workout_kcal(5.0f, 0, 60) == 0 && workout_kcal(0, 53, 60) == 0);
+    CHECK(WORKOUT_TYPE_COUNT > 3 && WORKOUT_TYPES[WORKOUT_TYPE_COUNT - 1].met == 0);
+
+    char dir[] = "/tmp/ct_act_XXXXXX";
+    CHECK(mkdtemp(dir) != NULL);
+    CHECK(storage_init(dir) == 0);
+    WorkoutDay day, again;
+    CHECK(workouts_load("2026-11-23", &day) == 0 && day.count == 0);
+    Workout w;
+    memset(&w, 0, sizeof w);
+    ct_strlcpy(w.name, "Weights", sizeof w.name);
+    w.minutes = 60;
+    w.kcal = 212;
+    CHECK(workouts_add(&day, &w) == 0);
+    ct_strlcpy(w.name, "Soccer", sizeof w.name);
+    w.kcal = 300;
+    CHECK(workouts_add(&day, &w) == 0);
+    CHECK(NEAR(workouts_total(&day), 512));
+    CHECK(workouts_save(&day) == 0);
+
+    WorkoutDay other;
+    CHECK(workouts_load("2026-11-24", &other) == 0 && other.count == 0);
+    other.items[0] = w;
+    other.count = 1;
+    CHECK(workouts_save(&other) == 0);
+
+    CHECK(workouts_load("2026-11-23", &again) == 0 && again.count == 2);
+    CHECK(strcmp(again.items[0].name, "Weights") == 0 && NEAR(again.items[1].kcal, 300));
+    workouts_remove(&again, 0);
+    CHECK(again.count == 1 && strcmp(again.items[0].name, "Soccer") == 0);
+    workouts_remove(&again, 0);
+    CHECK(workouts_save(&again) == 0);
+    CHECK(workouts_load("2026-11-23", &again) == 0 && again.count == 0);
+    CHECK(workouts_load("2026-11-24", &other) == 0 && other.count == 1);
 }
 
 int main(void)
@@ -312,6 +362,7 @@ int main(void)
     test_storage();
     test_cache_full();
     test_profile();
+    test_activity();
     if (failures) {
         fprintf(stderr, "%d check(s) failed\n", failures);
         return 1;

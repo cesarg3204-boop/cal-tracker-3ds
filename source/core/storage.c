@@ -306,7 +306,7 @@ int targets_save(const Targets *t)
 
 /* ---- helpers for the list files below ----------------------------------- */
 
-static cJSON *load_json(const char *name)
+cJSON *storage_load_json(const char *name)
 {
     char path[300];
     path_for(path, sizeof path, name);
@@ -318,7 +318,7 @@ static cJSON *load_json(const char *name)
     return root;
 }
 
-static int save_json(const char *name, cJSON *root)
+int storage_save_json(const char *name, cJSON *root)
 {
     char path[300];
     path_for(path, sizeof path, name);
@@ -326,6 +326,9 @@ static int save_json(const char *name, cJSON *root)
     cJSON_Delete(root);
     return rc;
 }
+
+#define load_json storage_load_json
+#define save_json storage_save_json
 
 static int same_food(const Food *a, const Food *b)
 {
