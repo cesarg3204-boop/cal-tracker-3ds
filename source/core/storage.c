@@ -97,6 +97,8 @@ static void food_to_json(cJSON *obj, const Food *food)
     cJSON_AddNumberToObject(obj, "carbs", food->carbs);
     cJSON_AddNumberToObject(obj, "fat", food->fat);
     cJSON_AddNumberToObject(obj, "serving_g", food->serving_g);
+    if (food->serving_label[0])
+        cJSON_AddStringToObject(obj, "serving", food->serving_label);
     cJSON *micro = NULL;
     for (int i = 0; i < MICRO_COUNT; i++) {
         if (food->micro[i] <= 0)
@@ -116,6 +118,7 @@ static void food_from_json(const cJSON *obj, Food *food)
     food->carbs = num(obj, "carbs");
     food->fat = num(obj, "fat");
     food->serving_g = num(obj, "serving_g");
+    ct_strlcpy(food->serving_label, str(obj, "serving"), sizeof food->serving_label);
     const cJSON *micro = cJSON_GetObjectItemCaseSensitive(obj, "micro");
     for (int i = 0; i < MICRO_COUNT; i++)
         food->micro[i] = micro ? num(micro, micro_info((Micro)i)->json) : 0;
@@ -128,6 +131,10 @@ static void entry_to_json(cJSON *obj, const Entry *e)
     cJSON_AddNumberToObject(obj, "meal", e->meal);
     if (e->quick)
         cJSON_AddTrueToObject(obj, "quick");
+    if (e->unit != UNIT_GRAMS && e->amount > 0) {
+        cJSON_AddNumberToObject(obj, "unit", e->unit);
+        cJSON_AddNumberToObject(obj, "amount", e->amount);
+    }
 }
 
 static void entry_from_json(const cJSON *obj, Entry *e)
@@ -137,6 +144,9 @@ static void entry_from_json(const cJSON *obj, Entry *e)
     int meal = (int)num(obj, "meal");
     e->meal = (meal >= 0 && meal < MEAL_COUNT) ? (Meal)meal : MEAL_SNACKS;
     e->quick = cJSON_IsTrue(cJSON_GetObjectItemCaseSensitive(obj, "quick"));
+    int unit = (int)num(obj, "unit");
+    e->unit = (unit > 0 && unit < UNIT_COUNT) ? (Unit)unit : UNIT_GRAMS;
+    e->amount = e->unit == UNIT_GRAMS ? e->grams : num(obj, "amount");
 }
 
 void storage_path(char *out, size_t size, const char *name)

@@ -8,7 +8,7 @@
 
 #define OFF_SEARCH "https://search.openfoodfacts.org/search"
 #define OFF_CGI "https://world.openfoodfacts.org/cgi/search.pl"
-#define OFF_FIELDS "product_name,product_name_es,product_name_en,brands,nutriments,serving_quantity"
+#define OFF_FIELDS "product_name,product_name_es,product_name_en,brands,nutriments,serving_quantity,serving_size"
 /* Ask for more than we show, because names in non-Latin scripts are dropped. */
 #define OFF_FETCH_SIZE (OFF_PAGE_SIZE * 2)
 
@@ -260,6 +260,15 @@ static int parse_one(const cJSON *p, const char *name, const cJSON *nutr, Food *
     get_number(nutr, "carbohydrates_100g", &f->carbs);
     get_number(nutr, "fat_100g", &f->fat);
     get_number(p, "serving_quantity", &f->serving_g);
+    const cJSON *ss = cJSON_GetObjectItemCaseSensitive(p, "serving_size");
+    if (cJSON_IsString(ss)) {
+        float g = 0;
+        serving_parse(ss->valuestring, f->serving_label, sizeof f->serving_label, &g);
+        if (f->serving_g <= 0 && g > 0)
+            f->serving_g = g;
+    }
+    if (f->serving_g <= 0)
+        f->serving_label[0] = '\0'; /* a label without grams can't be used */
     read_micros(nutr, f);
 
     ct_strlcpy(f->name, name, sizeof f->name);

@@ -144,6 +144,8 @@ typedef enum {
     ACT_WATER_REMOVE,
     ACT_MICROS,
     ACT_MICROS_BACK,
+    ACT_UNIT_CHOOSE,
+    ACT_UNIT_CANCEL,
 } Action;
 
 typedef struct {
@@ -218,6 +220,14 @@ static int g_streak_prev = 0;      /* goal days in a row before today */
 static bool g_today_hit = false;   /* today is a goal day so far */
 static unsigned g_anim = 0;        /* frame counter for animations */
 static int g_cheer = 0;            /* frames left of the mascot cheering */
+
+/* "How much?" picker: servings, grams, ounces... */
+typedef enum { UNIT_FOR_LOG, UNIT_FOR_EDIT } UnitMode;
+static bool g_unit_picking = false;
+static UnitMode g_unit_mode = UNIT_FOR_LOG;
+static Food g_unit_food;
+static Unit g_unit_opts[UNIT_COUNT];
+static int g_unit_n = 0, g_unit_sel = 0;
 
 /* ---- drawing helpers ---------------------------------------------------- */
 static void text(float x, float y, float scale, u32 color, u32 flags, const char *fmt, ...)
@@ -457,13 +467,15 @@ static bool add_entry(const Entry *e)
     return true;
 }
 
-/* Log a food with a given weight to the current meal slot. */
-static bool log_food_grams(const Food *food, float grams)
+/* Log a food to the current meal slot. */
+static bool log_food_amount(const Food *food, Unit unit, float amount, float grams)
 {
     Entry e;
     memset(&e, 0, sizeof e);
     e.food = *food;
     e.grams = grams;
+    e.unit = unit;
+    e.amount = amount;
     e.meal = g_slot;
     if (!add_entry(&e))
         return false;
@@ -471,9 +483,15 @@ static bool log_food_grams(const Food *food, float grams)
     foods_touch(&g_cache, food);
     foods_save(&g_cache);
     sound_play(SND_POP);
-    status("Added %.0f g %.24s (%.0f kcal) to %s", grams, food->name, entry_totals(&e).kcal,
-           meal_name(g_slot));
+    char amt[32];
+    amount_text(&e, amt, sizeof amt);
+    status("Added %s %.24s (%.0f kcal) to %s", amt, food->name, entry_totals(&e).kcal, meal_name(g_slot));
     return true;
+}
+
+static bool log_food_grams(const Food *food, float grams)
+{
+    return log_food_amount(food, UNIT_GRAMS, grams, grams);
 }
 
 /* Meal builder: add a food to the meal being built. */
@@ -489,36 +507,89 @@ static bool draft_add(const Entry *e)
     return true;
 }
 
-static void draft_add_food(const Food *food, float grams)
+static void draft_add_food(const Food *food, Unit unit, float amount, float grams)
 {
     Entry e;
     memset(&e, 0, sizeof e);
     e.food = *food;
     e.grams = grams;
+    e.unit = unit;
+    e.amount = amount;
     if (draft_add(&e)) {
         foods_touch(&g_cache, food);
         foods_save(&g_cache);
     }
 }
 
-/* "A" on a food: log it, or add it to the meal being built. */
+/* Opens the "How much?" picker for a food. `current` is preselected. */
+static void open_unit_picker(const Food *food, UnitMode mode, Unit current)
+{
+    g_unit_food = *food;
+    g_unit_mode = mode;
+    g_unit_n = 0;
+    static const Unit order[] = {UNIT_SERVINGS, UNIT_GRAMS, UNIT_OUNCES, UNIT_ML, UNIT_CUPS};
+    for (size_t i = 0; i < sizeof order / sizeof order[0]; i++)
+        if (unit_grams(food, order[i]) > 0)
+            g_unit_opts[g_unit_n++] = order[i];
+    g_unit_sel = 0;
+    for (int i = 0; i < g_unit_n; i++)
+        if (g_unit_opts[i] == current)
+            g_unit_sel = i;
+    g_unit_picking = true;
+}
+
+/* "A" on a food: pick how to measure it, then log it (or add it to the
+ * meal being built). */
 static void use_food_ask(const Food *food)
 {
-    float grams = food->serving_g > 0 ? food->serving_g : 100.0f;
-    if (!prompt_number(g_building ? "Grams in this meal" : "Grams eaten", grams, &grams) || grams <= 0)
-        return;
-    if (g_building)
-        draft_add_food(food, grams);
-    else
-        log_food_grams(food, grams);
+    open_unit_picker(food, UNIT_FOR_LOG, food->serving_g > 0 ? UNIT_SERVINGS : UNIT_GRAMS);
 }
 
 static void use_food_grams(const Food *food, float grams)
 {
     if (g_building)
-        draft_add_food(food, grams);
+        draft_add_food(food, UNIT_GRAMS, grams, grams);
     else
         log_food_grams(food, grams);
+}
+
+static Entry *selected_entry(void);
+
+static void unit_chosen(void)
+{
+    Unit u = g_unit_opts[g_unit_sel];
+    const Food *food = &g_unit_food;
+    float per = unit_grams(food, u);
+    Entry *edit = g_unit_mode == UNIT_FOR_EDIT ? selected_entry() : NULL;
+    float amount;
+    if (edit && edit->unit == u && edit->amount > 0)
+        amount = edit->amount;
+    else if (edit)
+        amount = edit->grams / per;
+    else if (u == UNIT_GRAMS)
+        amount = food->serving_g > 0 ? food->serving_g : 100;
+    else if (u == UNIT_ML)
+        amount = 250;
+    else
+        amount = 1;
+    amount = (float)(int)(amount * 10 + 0.5f) / 10;
+    static const char *hints[UNIT_COUNT] = {"How many grams?", "How many servings? (1.5 works)", "How many ounces?",
+                                            "How many ml?", "How many cups?"};
+    g_unit_picking = false;
+    if (!prompt_number(hints[u], amount, &amount) || amount <= 0)
+        return;
+    float grams = amount * per;
+    if (edit) {
+        edit->unit = u;
+        edit->amount = amount;
+        edit->grams = grams;
+        save_day();
+        status("Updated %.30s", edit->food.name);
+    } else if (g_building) {
+        draft_add_food(food, u, amount, grams);
+    } else {
+        log_food_amount(food, u, amount, grams);
+    }
 }
 
 static void toggle_star(const Food *food, float grams)
@@ -770,6 +841,7 @@ static void log_saved_meal(const SavedMeal *m, float factor)
             e.food.fat *= factor;
         } else {
             e.grams *= factor;
+            e.amount *= factor;
         }
         if (!add_entry(&e))
             break;
@@ -1080,6 +1152,11 @@ static void do_action(Action a)
     case ACT_WATER_REMOVE: change_water(-1); break;
     case ACT_MICROS: g_show_micros = true; break;
     case ACT_MICROS_BACK: g_show_micros = false; break;
+    case ACT_UNIT_CHOOSE:
+        if (g_unit_picking)
+            unit_chosen();
+        break;
+    case ACT_UNIT_CANCEL: g_unit_picking = false; break;
     case ACT_NEXT_WEEK: shift_day(WEEK); break;
     case ACT_TODAY:
         load_day(g_today);
@@ -1156,12 +1233,7 @@ static void do_action(Action a)
                 status("Quick entries have no grams: remove and re-add");
                 break;
             }
-            float grams = e->grams;
-            if (prompt_number("Grams eaten", grams, &grams) && grams > 0) {
-                e->grams = grams;
-                save_day();
-                status("Updated %.30s", e->food.name);
-            }
+            open_unit_picker(&e->food, UNIT_FOR_EDIT, e->amount > 0 ? e->unit : UNIT_GRAMS);
         } else if (t == TAB_FAVS && count > 0) {
             Favorite *f = &g_favs.items[*sel];
             float grams = f->grams;
@@ -1282,6 +1354,14 @@ static bool handle_keys(u32 down)
     if (g_scanning) {
         if (down & (KEY_B | KEY_START))
             do_action(ACT_SCAN_CANCEL);
+        return true;
+    }
+    if (g_unit_picking) {
+        int dummy = 0;
+        if (down & KEY_DUP) move_sel(&g_unit_sel, &dummy, -1, g_unit_n, g_unit_n);
+        if (down & KEY_DDOWN) move_sel(&g_unit_sel, &dummy, 1, g_unit_n, g_unit_n);
+        if (down & KEY_A) do_action(ACT_UNIT_CHOOSE);
+        if (down & KEY_B) do_action(ACT_UNIT_CANCEL);
         return true;
     }
     if (down & KEY_L) {
@@ -1430,6 +1510,11 @@ static void layout_buttons(void)
         add_button(x1, r1, w3, BTN_H, "B  Cancel", C_PANEL2, ACT_SCAN_CANCEL);
         return;
     }
+    if (g_unit_picking) {
+        add_button(x0, r1, w3, BTN_H, "A  Choose", C_GRAD, ACT_UNIT_CHOOSE);
+        add_button(x1, r1, w3, BTN_H, "B  Cancel", C_PANEL2, ACT_UNIT_CANCEL);
+        return;
+    }
 
     switch (g_tab) {
     case TAB_TODAY:
@@ -1527,7 +1612,7 @@ static void layout_buttons(void)
 /* What sits in the row above the tab bar. */
 static bool slot_row_visible(void)
 {
-    return !g_building && !g_scanning && !g_show_micros && g_tab != TAB_PROFILE &&
+    return !g_building && !g_scanning && !g_unit_picking && !g_show_micros && g_tab != TAB_PROFILE &&
            !(g_tab == TAB_BRANDS && g_brand_open < 0);
 }
 
@@ -1542,7 +1627,7 @@ static void handle_touch(void)
     hidTouchRead(&tp);
     float x = tp.px, y = tp.py;
 
-    if (y >= TAB_Y && !g_scanning) {
+    if (y >= TAB_Y && !g_scanning && !g_unit_picking) {
         int t = (int)(x / (BOT_W / TAB_COUNT));
         if (t >= 0 && t < TAB_COUNT)
             switch_tab((Tab)t);
@@ -1803,8 +1888,11 @@ static void draw_top_today(void)
         char right[40];
         if (e->quick)
             snprintf(right, sizeof right, "quick  %.0f kcal", et.kcal);
-        else
-            snprintf(right, sizeof right, "%.0f g  %.0f kcal", e->grams, et.kcal);
+        else {
+            char amt[32];
+            amount_text(e, amt, sizeof amt);
+            snprintf(right, sizeof right, "%s  %.0f kcal", amt, et.kcal);
+        }
         float ry = y + row * ROW_H;
         food_row(ry, idx == g_sel[TAB_TODAY], e->food.name, e->quick ? "" : e->food.brand,
                  !e->quick && is_fav(&e->food), right, meal_color(e->meal));
@@ -1835,6 +1923,35 @@ static void draw_top_micros(void)
         text(TOP_W - 12, y, 0.43f, C_TEXT, C2D_AlignRight, "%s / %s%s %s", v, mi->limit ? "max " : "", tg,
              mi->unit);
     }
+}
+
+static void draw_unit_picker(void)
+{
+    char title[80];
+    snprintf(title, sizeof title, "How much %.40s?", g_unit_food.name);
+    header(title, NULL);
+    for (int i = 0; i < g_unit_n; i++) {
+        float y = 34 + i * 22;
+        bool on = i == g_unit_sel;
+        if (on) {
+            rrect(4, y - 3, TOP_W - 8, 20, 6, C_PANEL2);
+            C2D_DrawRectSolid(4, y - 3, 0.45f, 3, 20, grad((float)i / (UNIT_COUNT - 1)));
+        }
+        char label[64];
+        unit_choice_text(&g_unit_food, g_unit_opts[i], label, sizeof label);
+        text(16, y, 0.52f, on ? C_TEXT : C_MUTED, 0, "%s", label);
+        Entry e;
+        memset(&e, 0, sizeof e);
+        e.food = g_unit_food;
+        e.grams = unit_grams(&g_unit_food, g_unit_opts[i]);
+        if (g_unit_opts[i] == UNIT_GRAMS)
+            e.grams = 100;
+        text(TOP_W - 12, y + 1, 0.45f, C_MUTED, C2D_AlignRight, "%s%.0f kcal",
+             g_unit_opts[i] == UNIT_GRAMS ? "100 g: " : "1: ", entry_totals(&e).kcal);
+    }
+    if (g_unit_food.serving_g <= 0)
+        text(TOP_W / 2, 34 + g_unit_n * 22 + 8, 0.42f, C_MUTED, C2D_AlignCenter,
+             "This product doesn't list a serving size, so servings are off");
 }
 
 static void draw_top_scanner(void)
@@ -1980,8 +2097,11 @@ static void entry_right(const Entry *e, char *out, size_t size)
 {
     if (e->quick)
         snprintf(out, size, "quick  %.0f kcal", entry_totals(e).kcal);
-    else
-        snprintf(out, size, "%.0f g  %.0f kcal", e->grams, entry_totals(e).kcal);
+    else {
+        char amt[32];
+        amount_text(e, amt, sizeof amt);
+        snprintf(out, size, "%s  %.0f kcal", amt, entry_totals(e).kcal);
+    }
 }
 
 static void draw_top_meals(void)
@@ -2382,7 +2502,10 @@ static void food_card(const Food *f, float grams, bool quick)
     card_bg();
     text(14, 12, 0.55f, C_TEXT, 0, "%.34s", f->name);
     if (!quick && f->brand[0])
-        text(14, 29, 0.45f, C_MUTED, 0, "%.40s", f->brand);
+        text(14, 29, 0.45f, C_MUTED, 0, "%.28s", f->brand);
+    if (!quick && f->serving_g > 0)
+        text(BOT_W - 14, 29, 0.42f, C_MUTED, C2D_AlignRight, "Serving: %.16s%s%.0f g", f->serving_label,
+             f->serving_label[0] ? " = " : "", f->serving_g);
     Entry e;
     memset(&e, 0, sizeof e);
     e.food = *f;
@@ -2501,6 +2624,10 @@ static void draw_details(void)
     int count = list_count(t);
     if (g_scanning) {
         hint_card("Scanning for a barcode...", "Works with EAN-13, UPC-A and EAN-8 codes");
+        return;
+    }
+    if (g_unit_picking) {
+        food_card(&g_unit_food, g_unit_food.serving_g, false);
         return;
     }
     if (t == TAB_TODAY && g_show_micros) {
@@ -2671,6 +2798,8 @@ int main(void)
         C2D_SceneBegin(top);
         if (g_scanning) {
             draw_top_scanner();
+        } else if (g_unit_picking) {
+            draw_unit_picker();
         } else switch (g_tab) {
         case TAB_TODAY:
             if (g_show_micros) draw_top_micros();

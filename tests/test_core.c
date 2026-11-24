@@ -549,6 +549,76 @@ static void test_activity(void)
     CHECK(workouts_load("2026-11-24", &other) == 0 && other.count == 1);
 }
 
+static void test_servings(void)
+{
+    char label[CT_SERVING_LEN];
+    float g = 0;
+    CHECK(serving_parse("1 bar (60 g)", label, sizeof label, &g));
+    CHECK(strcmp(label, "1 bar") == 0 && NEAR(g, 60));
+    g = 0;
+    CHECK(serving_parse("30 g", label, sizeof label, &g));
+    CHECK(label[0] == '\0' && NEAR(g, 30));
+    g = 0;
+    CHECK(serving_parse("2 cookies (28g)", label, sizeof label, &g));
+    CHECK(strcmp(label, "2 cookies") == 0 && NEAR(g, 28));
+    g = 0;
+    CHECK(serving_parse("30 g (1 bar)", label, sizeof label, &g));
+    CHECK(strcmp(label, "1 bar") == 0 && NEAR(g, 30));
+    g = 0;
+    CHECK(serving_parse("250 ml", label, sizeof label, &g));
+    CHECK(NEAR(g, 250) && label[0] == '\0');
+    g = 0;
+    CHECK(serving_parse("1 granola bar", label, sizeof label, &g));
+    CHECK(strcmp(label, "1 granola bar") == 0 && g == 0);
+    CHECK(!serving_parse("", label, sizeof label, &g));
+
+    /* a product reply with serving_size */
+    const char *json = "{\"status\":1,\"product\":{\"product_name\":\"Protein Bar\",\"serving_size\":\"1 bar (60 g)\","
+                       "\"nutriments\":{\"energy-kcal_100g\":350,\"proteins_100g\":33}}}";
+    Food f;
+    CHECK(off_parse_product(json, &f) == 1);
+    CHECK(NEAR(f.serving_g, 60) && strcmp(f.serving_label, "1 bar") == 0);
+
+    Entry e;
+    memset(&e, 0, sizeof e);
+    e.food = f;
+    CHECK(NEAR(unit_grams(&f, UNIT_SERVINGS), 60));
+    CHECK(NEAR(unit_grams(&f, UNIT_CUPS), 240));
+    e.unit = UNIT_SERVINGS;
+    e.amount = 1.5f;
+    e.grams = 90;
+    char t[48];
+    amount_text(&e, t, sizeof t);
+    CHECK(strcmp(t, "1.5 bars") == 0);
+    e.amount = 1;
+    amount_text(&e, t, sizeof t);
+    CHECK(strcmp(t, "1 bar") == 0);
+    e.unit = UNIT_OUNCES;
+    e.amount = 2;
+    amount_text(&e, t, sizeof t);
+    CHECK(strcmp(t, "2 oz") == 0);
+    e.unit = UNIT_GRAMS;
+    amount_text(&e, t, sizeof t);
+    CHECK(strcmp(t, "90 g") == 0);
+    Food plain;
+    memset(&plain, 0, sizeof plain);
+    CHECK(unit_grams(&plain, UNIT_SERVINGS) == 0);
+
+    /* unit and label survive a save */
+    DayLog day;
+    memset(&day, 0, sizeof day);
+    strcpy(day.date, "2026-11-20");
+    e.unit = UNIT_SERVINGS;
+    e.amount = 2;
+    e.grams = 120;
+    day_add(&day, &e);
+    CHECK(day_save(&day) == 0);
+    DayLog back;
+    CHECK(day_load("2026-11-20", &back) == 0 && back.count == 1);
+    CHECK(back.entries[0].unit == UNIT_SERVINGS && NEAR(back.entries[0].amount, 2));
+    CHECK(strcmp(back.entries[0].food.serving_label, "1 bar") == 0);
+}
+
 int main(void)
 {
     test_totals();
@@ -561,6 +631,7 @@ int main(void)
     test_micros();
     test_barcode();
     test_goals();
+    test_servings();
     if (failures) {
         fprintf(stderr, "%d check(s) failed\n", failures);
         return 1;

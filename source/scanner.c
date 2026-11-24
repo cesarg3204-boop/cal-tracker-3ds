@@ -15,6 +15,7 @@ static unsigned char *g_gray;  /* the same picture in gray */
 static C3D_Tex g_tex;
 static Tex3DS_SubTexture g_sub = {CAM_W, CAM_H, 0.0f, 1.0f, CAM_W / (float)TEX_W, 1.0f - CAM_H / (float)TEX_H};
 static u32 g_transfer;
+static Handle g_recv_event = 0, g_error_event = 0;
 
 bool scanner_running(void)
 {
@@ -53,9 +54,11 @@ int scanner_start(void)
     CAMU_SetTrimming(PORT_CAM1, false);
     CAMU_GetMaxBytes(&g_transfer, CAM_W, CAM_H);
     CAMU_SetTransferBytes(PORT_CAM1, g_transfer, CAM_W, CAM_H);
+    CAMU_GetBufferErrorInterruptEvent(&g_error_event, PORT_CAM1);
     CAMU_Activate(SELECT_OUT1);
     CAMU_ClearBuffer(PORT_CAM1);
     CAMU_StartCapture(PORT_CAM1);
+    g_recv_event = 0;
     g_on = true;
     return 0;
 }
@@ -65,6 +68,12 @@ void scanner_stop(void)
     if (!g_on)
         return;
     CAMU_StopCapture(PORT_CAM1);
+    if (g_recv_event)
+        svcCloseHandle(g_recv_event);
+    g_recv_event = 0;
+    if (g_error_event)
+        svcCloseHandle(g_error_event);
+    g_error_event = 0;
     CAMU_Activate(SELECT_NONE);
     camExit();
     C3D_TexDelete(&g_tex);
@@ -88,12 +97,21 @@ int scanner_frame(char out[BARCODE_LEN])
 {
     if (!g_on)
         return 0;
-    Handle ev = 0;
-    CAMU_SetReceiving(&ev, g_frame, PORT_CAM1, CAM_W * CAM_H * sizeof(u16), (s16)g_transfer);
-    Result rc = svcWaitSynchronization(ev, 100000000LL); /* 100 ms */
-    svcCloseHandle(ev);
-    if (R_FAILED(rc))
+    /* Ask for the next picture once, then check without blocking. If the
+     * camera's buffer overflows (we were busy), it stops until restarted. */
+    if (g_recv_event == 0)
+        CAMU_SetReceiving(&g_recv_event, g_frame, PORT_CAM1, CAM_W * CAM_H * sizeof(u16), (s16)g_transfer);
+    if (svcWaitSynchronization(g_error_event, 0) == 0) {
+        svcCloseHandle(g_recv_event);
+        g_recv_event = 0;
+        CAMU_ClearBuffer(PORT_CAM1);
+        CAMU_StartCapture(PORT_CAM1);
         return 0;
+    }
+    if (svcWaitSynchronization(g_recv_event, 0) != 0)
+        return 0; /* not ready yet: keep the last picture */
+    svcCloseHandle(g_recv_event);
+    g_recv_event = 0;
 
     u16 *tex = (u16 *)g_tex.data;
     for (u32 y = 0; y < CAM_H; y++) {
@@ -107,6 +125,8 @@ int scanner_frame(char out[BARCODE_LEN])
         }
     }
     C3D_TexFlush(&g_tex);
+    /* ask for the next picture right away, while we decode this one */
+    CAMU_SetReceiving(&g_recv_event, g_frame, PORT_CAM1, CAM_W * CAM_H * sizeof(u16), (s16)g_transfer);
     return barcode_read_image(g_gray, CAM_W, CAM_H, CAM_W, out);
 }
 
