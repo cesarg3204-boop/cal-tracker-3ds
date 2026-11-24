@@ -33,4 +33,10 @@ int off_text_contains(const char *hay, const char *needle);
  * duplicate names. */
 int off_parse_brand(const char *json, const char *brand, Food *out, int max);
 
+/* Looking up one product by its barcode (EAN-13, UPC-A, EAN-8). */
+int off_product_url(const char *barcode, char *out, size_t size);
+/* Returns 1 with the food filled, 0 if the product is unknown or has no
+ * calories, or -1 if the reply is not JSON. */
+int off_parse_product(const char *json, Food *out);
+
 #endif

@@ -29,6 +29,11 @@ typedef struct {
 int storage_init(const char *base_dir);
 /* Full path of a file in the data folder. */
 void storage_path(char *out, size_t size, const char *name);
+/* Parse a JSON file in the data folder (NULL if missing or invalid), and
+ * write one atomically (takes ownership of root). */
+struct cJSON;
+struct cJSON *storage_load_json(const char *name);
+int storage_save_json(const char *name, struct cJSON *root);
 
 /* A missing file is not an error: you get an empty day / cache / defaults. */
 int day_load(const char *date, DayLog *day);

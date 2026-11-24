@@ -113,28 +113,89 @@ def rounded(img, radius):
 
 
 def jingle(path, rate=32000):
-    """A short "pop" followed by a bright three-note chime (about 1.5 s)."""
-    n = int(rate * 1.5)
+    """An original little ocarina-style tune over a rolled harp chord, with
+    a soft room echo (about 2.8 s). The melody is our own (G major)."""
+    import random
+
+    rnd = random.Random(7)
+    dur_total = 2.8
+    n = int(rate * dur_total)
     out = [0.0] * n
 
-    def tone(start, dur, freq, vol, sweep=0.0):
+    def hz(note):
+        names = {"C": 0, "D": 2, "E": 4, "F": 5, "G": 7, "A": 9, "B": 11}
+        semis = names[note[0]] + (1 if "#" in note else 0)
+        octave = int(note[-1])
+        return 440.0 * 2 ** ((semis + 12 * (octave + 1) - 69) / 12)
+
+    def ocarina(start, dur, note, vol):
+        """Round, breathy flute tone: almost a pure sine, a slow vibrato that
+        grows in, a soft attack and a little air noise at the start."""
+        f0 = hz(note)
         s0 = int(start * rate)
         phase = 0.0
-        for i in range(int(dur * rate)):
+        noise = 0.0
+        length = int((dur + 0.12) * rate)
+        for i in range(length):
             if s0 + i >= n:
                 break
             t = i / rate
-            f = freq * (1 + sweep * math.exp(-t * 40))
-            phase += 2 * math.pi * f / rate
-            env = min(1.0, t * 400) * math.exp(-t * 6.0)
-            v = math.sin(phase) + 0.3 * math.sin(2 * phase) + 0.1 * math.sin(3 * phase)
+            vib = 1 + 0.006 * min(1.0, max(0.0, (t - 0.12) / 0.25)) * math.sin(2 * math.pi * 5.3 * t)
+            phase += 2 * math.pi * f0 * vib / rate
+            attack = min(1.0, t / 0.035)
+            release = 1.0 if t < dur else max(0.0, 1 - (t - dur) / 0.12)
+            env = attack * release * (0.85 + 0.15 * math.exp(-t * 6))
+            v = math.sin(phase) + 0.07 * math.sin(2 * phase) + 0.025 * math.sin(3 * phase)
+            noise = 0.9 * noise + 0.1 * (rnd.random() * 2 - 1)  # soft, low air
+            v += noise * 0.6 * math.exp(-t * 25)
             out[s0 + i] += v * env * vol
 
-    tone(0.00, 0.12, 380, 0.55, sweep=1.6)  # pop
-    tone(0.14, 0.6, 659.25, 0.30)           # E5
-    tone(0.26, 0.6, 783.99, 0.30)           # G5
-    tone(0.38, 1.1, 1046.50, 0.34)          # C6
-    tone(0.38, 1.1, 1318.51, 0.12)          # E6 sparkle
+    def harp(start, note, vol):
+        """A plucked string: a few harmonics that fade at different speeds."""
+        f0 = hz(note)
+        s0 = int(start * rate)
+        for i in range(int(1.8 * rate)):
+            if s0 + i >= n:
+                break
+            t = i / rate
+            env = min(1.0, t / 0.004)
+            v = (math.sin(2 * math.pi * f0 * t) * math.exp(-t * 2.2)
+                 + 0.45 * math.sin(4 * math.pi * f0 * t) * math.exp(-t * 4.5)
+                 + 0.18 * math.sin(6 * math.pi * f0 * t) * math.exp(-t * 8))
+            out[s0 + i] += v * env * vol
+
+    # rolled G major chord, then a second soft roll under the last note
+    for k, note in enumerate(["G3", "D4", "G4", "B4"]):
+        harp(0.02 + k * 0.05, note, 0.16)
+    for k, note in enumerate(["C4", "E4", "G4"]):
+        harp(0.95 + k * 0.05, note, 0.12)
+    for k, note in enumerate(["G3", "B3", "D4", "G4"]):
+        harp(1.45 + k * 0.06, note, 0.15)
+
+    # the tune: an original phrase that climbs, turns and settles home
+    melody = [
+        (0.10, 0.20, "D5"), (0.32, 0.20, "G5"), (0.54, 0.36, "B5"),
+        (0.92, 0.16, "C6"), (1.09, 0.16, "B5"), (1.26, 0.18, "G5"),
+        (1.46, 0.30, "A5"), (1.78, 0.80, "G5"),
+    ]
+    for start, dur, note in melody:
+        ocarina(start, dur, note, 0.42)
+
+    # small room: two feedback echoes, a little damped
+    wet = out[:]
+    for delay_s, gain in ((0.083, 0.28), (0.131, 0.22)):
+        d = int(delay_s * rate)
+        prev = 0.0
+        for i in range(d, n):
+            prev = 0.6 * prev + 0.4 * wet[i - d]
+            wet[i] += prev * gain
+    out = [0.75 * a + 0.25 * b for a, b in zip(out, wet)]
+
+    # gentle fade at the very end
+    fade = int(0.25 * rate)
+    for i in range(fade):
+        out[n - fade + i] *= 1 - i / fade
+
     peak = max(abs(v) for v in out) or 1
     frames = b"".join(struct.pack("<h", int(v / peak * 0.8 * 32767)) for v in out)
     with wave.open(path, "wb") as wf:

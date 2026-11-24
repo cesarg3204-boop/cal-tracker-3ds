@@ -9,18 +9,24 @@
  */
 #include <3ds.h>
 #include <citro2d.h>
+#include <math.h>
 #include <stdarg.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <time.h>
 
+#include "core/activity.h"
+#include "core/barcode.h"
 #include "core/date.h"
 #include "core/food.h"
 #include "core/off.h"
 #include "core/profile.h"
 #include "core/storage.h"
 #include "net.h"
+#include "pedometer.h"
+#include "scanner.h"
+#include "sound.h"
 
 #define DATA_DIR "sdmc:/3ds/caltracker" /* shared with the plain Cal Tracker */
 #define TOP_W 400.0f
@@ -75,8 +81,8 @@ static u32 grad(float t)
 typedef enum { TAB_TODAY, TAB_SEARCH, TAB_BRANDS, TAB_FAVS, TAB_MEALS, TAB_PROFILE, TAB_COUNT } Tab;
 static const char *TAB_NAMES[TAB_COUNT] = {"Today", "Search", "Brands", "Favs", "Meals", "Profile"};
 
-typedef enum { PAGE_PROFILE, PAGE_REPORT, PAGE_CHARTS, PAGE_COUNT } Page;
-static const char *PAGE_NAMES[PAGE_COUNT] = {"Profile", "Report", "Charts"};
+typedef enum { PAGE_PROFILE, PAGE_ACTIVITY, PAGE_REPORT, PAGE_CHARTS, PAGE_COUNT } Page;
+static const char *PAGE_NAMES[PAGE_COUNT] = {"Profile", "Activity", "Report", "Charts"};
 
 typedef enum {
     PR_AGE,
@@ -86,6 +92,8 @@ typedef enum {
     PR_BMI,
     PR_BODY_FAT,
     PR_ACTIVITY,
+    PR_WATER,
+    PR_SOUNDS,
     PR_KCAL,
     PR_PROTEIN,
     PR_CARBS,
@@ -119,13 +127,25 @@ typedef enum {
     ACT_SAVE_DRAFT,
     ACT_CANCEL_DRAFT,
     ACT_PAGE_PROFILE,
+    ACT_PAGE_ACTIVITY,
     ACT_PAGE_REPORT,
     ACT_PAGE_CHARTS,
     ACT_EDIT_ROW,
     ACT_LOG_WEIGHT,
-    ACT_EXERCISE,
+    ACT_ADD_WORKOUT,
+    ACT_REMOVE_WORKOUT,
+    ACT_PICK_CHOOSE,
+    ACT_PICK_CANCEL,
     ACT_PREV_WEEK,
     ACT_NEXT_WEEK,
+    ACT_SCAN,
+    ACT_SCAN_CANCEL,
+    ACT_WATER_ADD,
+    ACT_WATER_REMOVE,
+    ACT_MICROS,
+    ACT_MICROS_BACK,
+    ACT_UNIT_CHOOSE,
+    ACT_UNIT_CANCEL,
 } Action;
 
 typedef struct {
@@ -135,7 +155,7 @@ typedef struct {
     Action action;
 } Button;
 
-#define MAX_BUTTONS 10
+#define MAX_BUTTONS 12
 static Button g_buttons[MAX_BUTTONS];
 static int g_button_count;
 
@@ -147,7 +167,16 @@ static FavList g_favs;
 static MealList g_meals;
 static BrandList g_brands;
 static UserProfile g_profile;
-static Series g_weights, g_exercise;
+static Series g_weights, g_steps, g_water;
+
+/* Activity for the viewed day: steps from the 3DS and typed-in workouts. */
+static uint16_t g_step_hours[24];
+static unsigned g_step_total = 0;
+static bool g_steps_live = false; /* read from the pedometer, not the saved copy */
+static WorkoutDay g_workouts;
+static int g_workout_sel = 0;
+static bool g_picking = false; /* choosing a workout type */
+static int g_pick_sel = 0;
 static char g_today[CT_DATE_LEN];
 
 static Tab g_tab = TAB_TODAY;
@@ -175,13 +204,30 @@ static Totals g_week[WEEK];
 static char g_week_dates[WEEK][CT_DATE_LEN];
 static bool g_week_dirty = true;
 
-typedef enum { PEND_NONE, PEND_SEARCH, PEND_BRAND } Pending;
+typedef enum { PEND_NONE, PEND_SEARCH, PEND_BRAND, PEND_PRODUCT } Pending;
 static Pending g_pending = PEND_NONE;
 static char g_status[96] = "";
 static bool g_net_ok = false;
 
 static size_t g_order[CT_MAX_ENTRIES]; /* today's entries grouped by meal */
 static C2D_TextBuf g_textbuf;
+
+/* round 3: scanner, micronutrients page, streak, mascot */
+static bool g_scanning = false;
+static char g_barcode[BARCODE_LEN] = "";
+static bool g_show_micros = false; /* Today: the "all micronutrients" page */
+static int g_streak_prev = 0;      /* goal days in a row before today */
+static bool g_today_hit = false;   /* today is a goal day so far */
+static unsigned g_anim = 0;        /* frame counter for animations */
+static int g_cheer = 0;            /* frames left of the mascot cheering */
+
+/* "How much?" picker: servings, grams, ounces... */
+typedef enum { UNIT_FOR_LOG, UNIT_FOR_EDIT } UnitMode;
+static bool g_unit_picking = false;
+static UnitMode g_unit_mode = UNIT_FOR_LOG;
+static Food g_unit_food;
+static Unit g_unit_opts[UNIT_COUNT];
+static int g_unit_n = 0, g_unit_sel = 0;
 
 /* ---- drawing helpers ---------------------------------------------------- */
 static void text(float x, float y, float scale, u32 color, u32 flags, const char *fmt, ...)
@@ -325,6 +371,63 @@ static void reset_list(Tab t)
     g_scroll[t] = 0;
 }
 
+/* Re-reads steps and workouts for the viewed day. Steps that the
+ * pedometer reports are saved, so days it has forgotten still show. */
+static void refresh_activity(void)
+{
+    unsigned total = 0;
+    g_steps_live = pedometer_day(g_day.date, g_step_hours, &total) == 0 && total > 0;
+    if (g_steps_live) {
+        if ((unsigned)series_get(&g_steps, g_day.date) != total) {
+            series_set(&g_steps, g_day.date, (float)total);
+            series_save(&g_steps, STEPS_FILE);
+        }
+    } else {
+        memset(g_step_hours, 0, sizeof g_step_hours);
+        total = (unsigned)series_get(&g_steps, g_day.date);
+    }
+    g_step_total = total;
+    if (strcmp(g_workouts.date, g_day.date) != 0) {
+        workouts_load(g_day.date, &g_workouts);
+        g_workout_sel = 0;
+    }
+}
+
+/* Goal days: calories near the target and enough protein. */
+static int day_hit(const char *date, void *ctx)
+{
+    (void)ctx;
+    static DayLog tmp;
+    if (day_load(date, &tmp) != 0)
+        return 0;
+    Totals t = sum_entries(tmp.entries, tmp.count, -1);
+    return goal_day(t.kcal, t.protein, g_targets.kcal, g_targets.protein);
+}
+
+static void compute_streak(void)
+{
+    g_streak_prev = streak_before(g_today, day_hit, NULL, 365);
+}
+
+static int streak_now(void)
+{
+    return g_streak_prev + (g_today_hit ? 1 : 0);
+}
+
+/* Re-checks today's goal after a change. A new goal day gets a chime. */
+static void update_goal(bool announce)
+{
+    if (strcmp(g_day.date, g_today) != 0)
+        return;
+    Totals t = sum_entries(g_day.entries, g_day.count, -1);
+    bool hit = goal_day(t.kcal, t.protein, g_targets.kcal, g_targets.protein) != 0;
+    if (hit && !g_today_hit && announce) {
+        sound_play(SND_GOAL);
+        g_cheer = 180;
+    }
+    g_today_hit = hit;
+}
+
 static void load_day(const char *date)
 {
     if (day_load(date, &g_day) != 0)
@@ -332,6 +435,8 @@ static void load_day(const char *date)
     rebuild_order();
     reset_list(TAB_TODAY);
     g_week_dirty = true;
+    refresh_activity();
+    update_goal(false);
 }
 
 static void save_day(void)
@@ -340,6 +445,7 @@ static void save_day(void)
         status("Could not save to the SD card");
     rebuild_order();
     g_week_dirty = true;
+    update_goal(true);
 }
 
 static Meal meal_for_now(void)
@@ -361,22 +467,31 @@ static bool add_entry(const Entry *e)
     return true;
 }
 
-/* Log a food with a given weight to the current meal slot. */
-static bool log_food_grams(const Food *food, float grams)
+/* Log a food to the current meal slot. */
+static bool log_food_amount(const Food *food, Unit unit, float amount, float grams)
 {
     Entry e;
     memset(&e, 0, sizeof e);
     e.food = *food;
     e.grams = grams;
+    e.unit = unit;
+    e.amount = amount;
     e.meal = g_slot;
     if (!add_entry(&e))
         return false;
     save_day();
     foods_touch(&g_cache, food);
     foods_save(&g_cache);
-    status("Added %.0f g %.24s (%.0f kcal) to %s", grams, food->name, entry_totals(&e).kcal,
-           meal_name(g_slot));
+    sound_play(SND_POP);
+    char amt[32];
+    amount_text(&e, amt, sizeof amt);
+    status("Added %s %.24s (%.0f kcal) to %s", amt, food->name, entry_totals(&e).kcal, meal_name(g_slot));
     return true;
+}
+
+static bool log_food_grams(const Food *food, float grams)
+{
+    return log_food_amount(food, UNIT_GRAMS, grams, grams);
 }
 
 /* Meal builder: add a food to the meal being built. */
@@ -387,40 +502,94 @@ static bool draft_add(const Entry *e)
         return false;
     }
     g_draft.items[g_draft.count++] = *e;
+    sound_play(SND_POP);
     status("Added %.24s to \"%.20s\" (%d foods)", e->food.name, g_draft.name, (int)g_draft.count);
     return true;
 }
 
-static void draft_add_food(const Food *food, float grams)
+static void draft_add_food(const Food *food, Unit unit, float amount, float grams)
 {
     Entry e;
     memset(&e, 0, sizeof e);
     e.food = *food;
     e.grams = grams;
+    e.unit = unit;
+    e.amount = amount;
     if (draft_add(&e)) {
         foods_touch(&g_cache, food);
         foods_save(&g_cache);
     }
 }
 
-/* "A" on a food: log it, or add it to the meal being built. */
+/* Opens the "How much?" picker for a food. `current` is preselected. */
+static void open_unit_picker(const Food *food, UnitMode mode, Unit current)
+{
+    g_unit_food = *food;
+    g_unit_mode = mode;
+    g_unit_n = 0;
+    static const Unit order[] = {UNIT_SERVINGS, UNIT_GRAMS, UNIT_OUNCES, UNIT_ML, UNIT_CUPS};
+    for (size_t i = 0; i < sizeof order / sizeof order[0]; i++)
+        if (unit_grams(food, order[i]) > 0)
+            g_unit_opts[g_unit_n++] = order[i];
+    g_unit_sel = 0;
+    for (int i = 0; i < g_unit_n; i++)
+        if (g_unit_opts[i] == current)
+            g_unit_sel = i;
+    g_unit_picking = true;
+}
+
+/* "A" on a food: pick how to measure it, then log it (or add it to the
+ * meal being built). */
 static void use_food_ask(const Food *food)
 {
-    float grams = food->serving_g > 0 ? food->serving_g : 100.0f;
-    if (!prompt_number(g_building ? "Grams in this meal" : "Grams eaten", grams, &grams) || grams <= 0)
-        return;
-    if (g_building)
-        draft_add_food(food, grams);
-    else
-        log_food_grams(food, grams);
+    open_unit_picker(food, UNIT_FOR_LOG, food->serving_g > 0 ? UNIT_SERVINGS : UNIT_GRAMS);
 }
 
 static void use_food_grams(const Food *food, float grams)
 {
     if (g_building)
-        draft_add_food(food, grams);
+        draft_add_food(food, UNIT_GRAMS, grams, grams);
     else
         log_food_grams(food, grams);
+}
+
+static Entry *selected_entry(void);
+
+static void unit_chosen(void)
+{
+    Unit u = g_unit_opts[g_unit_sel];
+    const Food *food = &g_unit_food;
+    float per = unit_grams(food, u);
+    Entry *edit = g_unit_mode == UNIT_FOR_EDIT ? selected_entry() : NULL;
+    float amount;
+    if (edit && edit->unit == u && edit->amount > 0)
+        amount = edit->amount;
+    else if (edit)
+        amount = edit->grams / per;
+    else if (u == UNIT_GRAMS)
+        amount = food->serving_g > 0 ? food->serving_g : 100;
+    else if (u == UNIT_ML)
+        amount = 250;
+    else
+        amount = 1;
+    amount = (float)(int)(amount * 10 + 0.5f) / 10;
+    static const char *hints[UNIT_COUNT] = {"How many grams?", "How many servings? (1.5 works)", "How many ounces?",
+                                            "How many ml?", "How many cups?"};
+    g_unit_picking = false;
+    if (!prompt_number(hints[u], amount, &amount) || amount <= 0)
+        return;
+    float grams = amount * per;
+    if (edit) {
+        edit->unit = u;
+        edit->amount = amount;
+        edit->grams = grams;
+        save_day();
+        status("Updated %.30s", edit->food.name);
+    } else if (g_building) {
+        draft_add_food(food, u, amount, grams);
+    } else {
+        log_food_amount(food, u, amount, grams);
+    }
 }
 
 static void toggle_star(const Food *food, float grams)
@@ -467,7 +636,7 @@ static void compute_week(void)
 /* ---- selection helpers -------------------------------------------------- */
 static int visible_rows(Tab t)
 {
-    if (t == TAB_TODAY) return 10;
+    if (t == TAB_TODAY) return 8;
     if (t == TAB_PROFILE) return PR_COUNT;
     if (t == TAB_MEALS && g_building) return 12;
     return 13;
@@ -655,6 +824,7 @@ static void quick_entry(void)
     if (!add_entry(&e))
         return;
     save_day();
+    sound_play(SND_POP);
     status("Quick added %.0f kcal to %s", kcal, meal_name(g_slot));
 }
 
@@ -671,20 +841,116 @@ static void log_saved_meal(const SavedMeal *m, float factor)
             e.food.fat *= factor;
         } else {
             e.grams *= factor;
+            e.amount *= factor;
         }
         if (!add_entry(&e))
             break;
         added++;
     }
     save_day();
+    if (added > 0)
+        sound_play(SND_POP);
     status("Logged \"%.24s\" (%d foods) to %s", m->name, added, meal_name(g_slot));
 }
 
 static void switch_tab(Tab t)
 {
+    if (t != g_tab)
+        sound_play(SND_TAP);
+    g_picking = false;
+    g_show_micros = false;
+    if (t == TAB_PROFILE && g_tab != TAB_PROFILE)
+        refresh_activity();
     g_tab = t;
     if (g_status[0] == 'L' && strncmp(g_status, "Loading", 7) == 0)
         g_status[0] = '\0';
+}
+
+/* ---- water ------------------------------------------------------------- */
+static int water_goal(void)
+{
+    return g_profile.water_goal > 0 ? g_profile.water_goal : 8;
+}
+
+static int water_glasses(void)
+{
+    return (int)(series_get(&g_water, g_day.date) + 0.5f);
+}
+
+static void change_water(int delta)
+{
+    int n = water_glasses() + delta;
+    if (n < 0)
+        return;
+    if (n > 40)
+        n = 40;
+    series_set(&g_water, g_day.date, (float)n);
+    if (series_save(&g_water, WATER_FILE) != 0) {
+        status("Could not save water");
+        return;
+    }
+    if (delta > 0 && n == water_goal()) {
+        sound_play(SND_GOAL);
+        g_cheer = 120;
+        status("Water goal reached: %d glasses!", n);
+    } else {
+        sound_play(SND_WATER);
+        status("Water: %d of %d glasses", n, water_goal());
+    }
+}
+
+/* ---- barcode scanning --------------------------------------------------- */
+static void start_scan(void)
+{
+    if (!g_net_ok) {
+        status("Scanning needs the internet to look foods up");
+        return;
+    }
+    if (scanner_start() != 0) {
+        status("Could not start the camera");
+        return;
+    }
+    g_scanning = true;
+    status("Point the outer camera at a barcode");
+}
+
+static void stop_scan(void)
+{
+    scanner_stop();
+    g_scanning = false;
+}
+
+/* Looks up g_barcode on Open Food Facts and shows it in Search. */
+static void lookup_product(void)
+{
+    char url[256], err[96] = "";
+    if (off_product_url(g_barcode, url, sizeof url) != 0) {
+        status("That barcode doesn't look right");
+        return;
+    }
+    char *body = NULL;
+    if (net_get(url, &body, err, sizeof err) != 0) {
+        status("Lookup failed: %s", err);
+        return;
+    }
+    Food f;
+    int rc = off_parse_product(body, &f);
+    free(body);
+    if (rc < 0) {
+        status("Lookup failed: unexpected reply");
+        return;
+    }
+    if (rc == 0) {
+        status("%s isn't in Open Food Facts yet. Try Quick add", g_barcode);
+        return;
+    }
+    g_results[0] = f;
+    g_result_count = 1;
+    g_have_results = true;
+    snprintf(g_query, sizeof g_query, "%s", g_barcode);
+    switch_tab(TAB_SEARCH);
+    reset_list(TAB_SEARCH);
+    status("Found it! A to %s %.28s", g_building ? "add" : "log", f.name);
 }
 
 static void start_meal(void)
@@ -733,6 +999,8 @@ static void edit_target(const char *hint, float *value)
     if (prompt_number(hint, v, &v)) {
         *value = v;
         status(targets_save(&g_targets) == 0 ? "Targets saved" : "Could not save targets");
+        compute_streak();
+        update_goal(false);
     }
 }
 
@@ -781,6 +1049,19 @@ static void edit_profile_row(ProfileRow row)
         p->activity = (Activity)((p->activity + 1) % ACTIVITY_COUNT);
         save_profile();
         break;
+    case PR_WATER:
+        v = (float)water_goal();
+        if (prompt_number("Water goal (glasses of 250 ml)", v, &v) && v >= 1 && v <= 30) {
+            p->water_goal = (int)(v + 0.5f);
+            save_profile();
+        }
+        break;
+    case PR_SOUNDS:
+        p->sounds_off = !p->sounds_off;
+        sound_enable(!p->sounds_off);
+        save_profile();
+        sound_play(SND_TAP);
+        break;
     case PR_KCAL: edit_target("Daily calories", &g_targets.kcal); break;
     case PR_PROTEIN: edit_target("Daily protein (g)", &g_targets.protein); break;
     case PR_CARBS: edit_target("Daily carbs (g)", &g_targets.carbs); break;
@@ -789,18 +1070,46 @@ static void edit_profile_row(ProfileRow row)
     }
 }
 
-static void log_exercise(void)
+static float weight_for_day(void)
 {
-    float kcal = series_get(&g_exercise, g_day.date);
-    if (!prompt_number("Exercise calories for this day (0 = none)", kcal, &kcal))
+    float kg = series_latest(&g_weights, g_day.date);
+    return kg > 0 ? kg : current_weight();
+}
+
+static void add_workout(const WorkoutType *type)
+{
+    Workout w;
+    memset(&w, 0, sizeof w);
+    if (type->met > 0) {
+        float kg = weight_for_day();
+        if (kg <= 0) {
+            status("Log your weight in Profile first");
+            return;
+        }
+        float minutes = 45;
+        if (!prompt_number("How many minutes?", minutes, &minutes) || minutes <= 0)
+            return;
+        ct_strlcpy(w.name, type->name, sizeof w.name);
+        w.minutes = minutes;
+        w.kcal = workout_kcal(type->met, kg, minutes);
+    } else {
+        if (!prompt_text("Workout name (e.g. Boxing)", NULL, w.name, sizeof w.name))
+            return;
+        float kcal = 0;
+        if (!prompt_number("Calories burned", kcal, &kcal) || kcal <= 0)
+            return;
+        w.kcal = kcal;
+    }
+    if (workouts_add(&g_workouts, &w) != 0) {
+        status("Up to %d workouts a day", CT_MAX_WORKOUTS);
         return;
-    series_set(&g_exercise, g_day.date, kcal);
-    if (series_save(&g_exercise, EXERCISE_FILE) != 0)
-        status("Could not save exercise");
-    else if (kcal > 0)
-        status("Exercise: %.0f kcal on %s", kcal, g_day.date);
+    }
+    g_picking = false;
+    g_workout_sel = (int)g_workouts.count - 1;
+    if (workouts_save(&g_workouts) != 0)
+        status("Could not save the workout");
     else
-        status("No exercise on %s", g_day.date);
+        status("Added %.20s: %.0f kcal", w.name, w.kcal);
 }
 
 static void shift_day(int days)
@@ -834,6 +1143,20 @@ static void do_action(Action a)
     case ACT_PREV_DAY: shift_day(-1); break;
     case ACT_NEXT_DAY: shift_day(1); break;
     case ACT_PREV_WEEK: shift_day(-WEEK); break;
+    case ACT_SCAN: start_scan(); break;
+    case ACT_SCAN_CANCEL:
+        stop_scan();
+        status("Scan cancelled");
+        break;
+    case ACT_WATER_ADD: change_water(1); break;
+    case ACT_WATER_REMOVE: change_water(-1); break;
+    case ACT_MICROS: g_show_micros = true; break;
+    case ACT_MICROS_BACK: g_show_micros = false; break;
+    case ACT_UNIT_CHOOSE:
+        if (g_unit_picking)
+            unit_chosen();
+        break;
+    case ACT_UNIT_CANCEL: g_unit_picking = false; break;
     case ACT_NEXT_WEEK: shift_day(WEEK); break;
     case ACT_TODAY:
         load_day(g_today);
@@ -853,6 +1176,7 @@ static void do_action(Action a)
         status("Meal not saved");
         break;
     case ACT_PAGE_PROFILE: g_page = PAGE_PROFILE; break;
+    case ACT_PAGE_ACTIVITY: g_page = PAGE_ACTIVITY; break;
     case ACT_PAGE_REPORT: g_page = PAGE_REPORT; break;
     case ACT_PAGE_CHARTS: g_page = PAGE_CHARTS; break;
     case ACT_EDIT_ROW:
@@ -862,8 +1186,25 @@ static void do_action(Action a)
     case ACT_LOG_WEIGHT:
         log_weight();
         break;
-    case ACT_EXERCISE:
-        log_exercise();
+    case ACT_ADD_WORKOUT:
+        g_picking = true;
+        g_pick_sel = 0;
+        break;
+    case ACT_PICK_CANCEL:
+        g_picking = false;
+        break;
+    case ACT_PICK_CHOOSE:
+        if (g_picking)
+            add_workout(&WORKOUT_TYPES[g_pick_sel]);
+        break;
+    case ACT_REMOVE_WORKOUT:
+        if (g_workouts.count > 0) {
+            status("Removed %.24s", g_workouts.items[g_workout_sel].name);
+            workouts_remove(&g_workouts, (size_t)g_workout_sel);
+            workouts_save(&g_workouts);
+            if (g_workout_sel >= (int)g_workouts.count && g_workout_sel > 0)
+                g_workout_sel--;
+        }
         break;
     case ACT_DELETE:
         if (t == TAB_TODAY && count > 0) {
@@ -892,12 +1233,7 @@ static void do_action(Action a)
                 status("Quick entries have no grams: remove and re-add");
                 break;
             }
-            float grams = e->grams;
-            if (prompt_number("Grams eaten", grams, &grams) && grams > 0) {
-                e->grams = grams;
-                save_day();
-                status("Updated %.30s", e->food.name);
-            }
+            open_unit_picker(&e->food, UNIT_FOR_EDIT, e->amount > 0 ? e->unit : UNIT_GRAMS);
         } else if (t == TAB_FAVS && count > 0) {
             Favorite *f = &g_favs.items[*sel];
             float grams = f->grams;
@@ -1015,6 +1351,19 @@ static bool handle_keys(u32 down)
 {
     if (down & KEY_START)
         return false;
+    if (g_scanning) {
+        if (down & (KEY_B | KEY_START))
+            do_action(ACT_SCAN_CANCEL);
+        return true;
+    }
+    if (g_unit_picking) {
+        int dummy = 0;
+        if (down & KEY_DUP) move_sel(&g_unit_sel, &dummy, -1, g_unit_n, g_unit_n);
+        if (down & KEY_DDOWN) move_sel(&g_unit_sel, &dummy, 1, g_unit_n, g_unit_n);
+        if (down & KEY_A) do_action(ACT_UNIT_CHOOSE);
+        if (down & KEY_B) do_action(ACT_UNIT_CANCEL);
+        return true;
+    }
     if (down & KEY_L) {
         switch_tab((Tab)((g_tab + TAB_COUNT - 1) % TAB_COUNT));
         return true;
@@ -1042,15 +1391,30 @@ static bool handle_keys(u32 down)
 
     /* Profile: Left/Right change page */
     if (t == TAB_PROFILE) {
+        if (g_picking) {
+            int dummy = 0;
+            if (down & KEY_DUP) move_sel(&g_pick_sel, &dummy, -1, WORKOUT_TYPE_COUNT, WORKOUT_TYPE_COUNT);
+            if (down & KEY_DDOWN) move_sel(&g_pick_sel, &dummy, 1, WORKOUT_TYPE_COUNT, WORKOUT_TYPE_COUNT);
+            if (down & KEY_A) do_action(ACT_PICK_CHOOSE);
+            if (down & KEY_B) do_action(ACT_PICK_CANCEL);
+            return true;
+        }
         if (down & KEY_DLEFT) g_page = (Page)((g_page + PAGE_COUNT - 1) % PAGE_COUNT);
         if (down & KEY_DRIGHT) g_page = (Page)((g_page + 1) % PAGE_COUNT);
-        if (g_page == PAGE_PROFILE) {
+        if (g_page == PAGE_ACTIVITY) {
+            int dummy = 0, n = (int)g_workouts.count;
+            if (down & KEY_DUP) move_sel(&g_workout_sel, &dummy, -1, n, n);
+            if (down & KEY_DDOWN) move_sel(&g_workout_sel, &dummy, 1, n, n);
+            if (down & KEY_A) do_action(ACT_ADD_WORKOUT);
+            if (down & KEY_X) do_action(ACT_REMOVE_WORKOUT);
+            if (down & KEY_Y) do_action(ACT_PREV_DAY);
+            if (down & KEY_B) do_action(ACT_TODAY);
+        } else if (g_page == PAGE_PROFILE) {
             if (down & KEY_DUP) move_sel(&g_sel[t], &g_scroll[t], -1, PR_COUNT, PR_COUNT);
             if (down & KEY_DDOWN) move_sel(&g_sel[t], &g_scroll[t], 1, PR_COUNT, PR_COUNT);
             if (down & KEY_A) do_action(ACT_EDIT_ROW);
             if (down & KEY_Y) do_action(ACT_LOG_WEIGHT);
         } else if (g_page == PAGE_REPORT) {
-            if (down & KEY_A) do_action(ACT_EXERCISE);
             if (down & KEY_Y) do_action(ACT_PREV_DAY);
             if (down & KEY_X) do_action(ACT_NEXT_DAY);
             if (down & KEY_B) do_action(ACT_TODAY);
@@ -1067,7 +1431,15 @@ static bool handle_keys(u32 down)
     if (down & KEY_DUP) move_sel(sel, scroll, -1, count, visible_rows(t));
     if (down & KEY_DDOWN) move_sel(sel, scroll, 1, count, visible_rows(t));
 
+    if (t == TAB_TODAY && g_show_micros) {
+        if (down & KEY_DLEFT) do_action(ACT_PREV_DAY);
+        if (down & KEY_DRIGHT) do_action(ACT_NEXT_DAY);
+        if (down & KEY_B) do_action(ACT_MICROS_BACK);
+        return true;
+    }
     if (t == TAB_TODAY) {
+        if (down & KEY_ZR) do_action(ACT_WATER_ADD);
+        if (down & KEY_ZL) do_action(ACT_WATER_REMOVE);
         if (down & KEY_DLEFT) do_action(ACT_PREV_DAY);
         if (down & KEY_DRIGHT) do_action(ACT_NEXT_DAY);
         if (down & KEY_A) do_action(ACT_GO_SEARCH);
@@ -1097,6 +1469,7 @@ static bool handle_keys(u32 down)
     case TAB_SEARCH:
         if (down & KEY_Y) do_action(ACT_SEARCH);
         if (down & KEY_X) do_action(ACT_STAR);
+        if (down & KEY_SELECT) do_action(ACT_SCAN);
         break;
     case TAB_BRANDS:
         if (down & KEY_Y) do_action(ACT_REFRESH);
@@ -1131,15 +1504,35 @@ static void layout_buttons(void)
     float x0 = 8, x1 = 8 + w3 + 8, x2 = 8 + 2 * (w3 + 8);
     float r0 = BTN_Y, r1 = BTN_Y + BTN_H + 5;
     const char *add = g_building ? "A  Add to meal" : "A  Log";
+    float w4 = (BOT_W - 8 * 5) / 4; /* four per row */
+
+    if (g_scanning) {
+        add_button(x1, r1, w3, BTN_H, "B  Cancel", C_PANEL2, ACT_SCAN_CANCEL);
+        return;
+    }
+    if (g_unit_picking) {
+        add_button(x0, r1, w3, BTN_H, "A  Choose", C_GRAD, ACT_UNIT_CHOOSE);
+        add_button(x1, r1, w3, BTN_H, "B  Cancel", C_PANEL2, ACT_UNIT_CANCEL);
+        return;
+    }
 
     switch (g_tab) {
     case TAB_TODAY:
-        add_button(x0, r0, w3, BTN_H, "Quick add", C_GRAD, ACT_QUICK);
-        add_button(x1, r0, w3, BTN_H, "A  Add food", C_GRAD, ACT_GO_SEARCH);
-        add_button(x2, r0, w3, BTN_H, "Fav it", C_GRAD, ACT_STAR);
-        add_button(x0, r1, w3, BTN_H, "< Day", C_PANEL2, ACT_PREV_DAY);
-        add_button(x1, r1, w3, BTN_H, "B  Today", C_PANEL2, ACT_TODAY);
-        add_button(x2, r1, w3, BTN_H, "Day >", C_PANEL2, ACT_NEXT_DAY);
+        if (g_show_micros) {
+            add_button(x0, r1, w3, BTN_H, "< Day", C_PANEL2, ACT_PREV_DAY);
+            add_button(x1, r1, w3, BTN_H, "B  Back", C_GRAD, ACT_MICROS_BACK);
+            add_button(x2, r1, w3, BTN_H, "Day >", C_PANEL2, ACT_NEXT_DAY);
+            break;
+        }
+        add_button(8, r0, w4, BTN_H, "Quick add", C_GRAD, ACT_QUICK);
+        add_button(8 + (w4 + 8), r0, w4, BTN_H, "A  Add food", C_GRAD, ACT_GO_SEARCH);
+        add_button(8 + 2 * (w4 + 8), r0, w4, BTN_H, "Scan", C_GRAD, ACT_SCAN);
+        add_button(8 + 3 * (w4 + 8), r0, w4, BTN_H, "Fav it", C_GRAD, ACT_STAR);
+        add_button(8, r1, w4, BTN_H, "< Day", C_PANEL2, ACT_PREV_DAY);
+        add_button(8 + (w4 + 8), r1, w4 - 26, BTN_H, "+ Water", C_GRAD, ACT_WATER_ADD);
+        add_button(8 + (w4 + 8) + w4 - 22, r1, 22, BTN_H, "-", C_PANEL2, ACT_WATER_REMOVE);
+        add_button(8 + 2 * (w4 + 8), r1, w4, BTN_H, "All micros", C_GRAD, ACT_MICROS);
+        add_button(8 + 3 * (w4 + 8), r1, w4, BTN_H, "Day >", C_PANEL2, ACT_NEXT_DAY);
         break;
     case TAB_SEARCH:
         add_button(x0, r0, w3, BTN_H, "Y  Search", C_GRAD, ACT_SEARCH);
@@ -1147,6 +1540,7 @@ static void layout_buttons(void)
         add_button(x2, r0, w3, BTN_H, "X  Fav", C_GRAD, ACT_STAR);
         if (g_have_results)
             add_button(x0, r1, w3, BTN_H, "B  Recent", C_PANEL2, ACT_BACK);
+        add_button(x1, r1, w3, BTN_H, "Scan barcode", C_GRAD, ACT_SCAN);
         break;
     case TAB_BRANDS:
         if (g_brand_open < 0) {
@@ -1181,16 +1575,27 @@ static void layout_buttons(void)
         }
         break;
     case TAB_PROFILE: {
-        static const Action pages[PAGE_COUNT] = {ACT_PAGE_PROFILE, ACT_PAGE_REPORT, ACT_PAGE_CHARTS};
-        float xs[3] = {x0, x1, x2};
+        if (g_picking) {
+            add_button(x0, r1, w3, BTN_H, "A  Choose", C_GRAD, ACT_PICK_CHOOSE);
+            add_button(x1, r1, w3, BTN_H, "B  Cancel", C_PANEL2, ACT_PICK_CANCEL);
+            break;
+        }
+        static const Action pages[PAGE_COUNT] = {ACT_PAGE_PROFILE, ACT_PAGE_ACTIVITY, ACT_PAGE_REPORT,
+                                                 ACT_PAGE_CHARTS};
         for (int i = 0; i < PAGE_COUNT; i++)
-            add_button(xs[i], r0, w3, BTN_H, PAGE_NAMES[i], i == (int)g_page ? C_GRAD : C_PANEL2, pages[i]);
-        if (g_page == PAGE_PROFILE) {
+            add_button(8 + i * (w4 + 8), r0, w4, BTN_H, PAGE_NAMES[i], i == (int)g_page ? C_GRAD : C_PANEL2,
+                       pages[i]);
+        if (g_page == PAGE_ACTIVITY) {
+            add_button(8, r1, w4, BTN_H, "Y  < Day", C_PANEL2, ACT_PREV_DAY);
+            add_button(8 + (w4 + 8), r1, w4, BTN_H, "A  Workout", C_GRAD, ACT_ADD_WORKOUT);
+            add_button(8 + 2 * (w4 + 8), r1, w4, BTN_H, "X  Remove", C_PANEL2, ACT_REMOVE_WORKOUT);
+            add_button(8 + 3 * (w4 + 8), r1, w4, BTN_H, "Day >", C_PANEL2, ACT_NEXT_DAY);
+        } else if (g_page == PAGE_PROFILE) {
             add_button(x0, r1, w3, BTN_H, "A  Change", C_GRAD, ACT_EDIT_ROW);
             add_button(x1, r1, w3, BTN_H, "Y  Log weight", C_GRAD, ACT_LOG_WEIGHT);
         } else if (g_page == PAGE_REPORT) {
             add_button(x0, r1, w3, BTN_H, "Y  < Day", C_PANEL2, ACT_PREV_DAY);
-            add_button(x1, r1, w3, BTN_H, "A  Exercise", C_GRAD, ACT_EXERCISE);
+            add_button(x1, r1, w3, BTN_H, "B  Today", C_PANEL2, ACT_TODAY);
             add_button(x2, r1, w3, BTN_H, "X  Day >", C_PANEL2, ACT_NEXT_DAY);
         } else {
             add_button(x0, r1, w3, BTN_H, "Y  < Week", C_PANEL2, ACT_PREV_WEEK);
@@ -1207,12 +1612,13 @@ static void layout_buttons(void)
 /* What sits in the row above the tab bar. */
 static bool slot_row_visible(void)
 {
-    return !g_building && g_tab != TAB_PROFILE && !(g_tab == TAB_BRANDS && g_brand_open < 0);
+    return !g_building && !g_scanning && !g_unit_picking && !g_show_micros && g_tab != TAB_PROFILE &&
+           !(g_tab == TAB_BRANDS && g_brand_open < 0);
 }
 
 static bool build_strip_visible(void)
 {
-    return g_building && g_tab != TAB_PROFILE;
+    return g_building && !g_scanning && g_tab != TAB_PROFILE;
 }
 
 static void handle_touch(void)
@@ -1221,7 +1627,7 @@ static void handle_touch(void)
     hidTouchRead(&tp);
     float x = tp.px, y = tp.py;
 
-    if (y >= TAB_Y) {
+    if (y >= TAB_Y && !g_scanning && !g_unit_picking) {
         int t = (int)(x / (BOT_W / TAB_COUNT));
         if (t >= 0 && t < TAB_COUNT)
             switch_tab((Tab)t);
@@ -1290,30 +1696,188 @@ static u32 meal_color(Meal m)
     return grad((float)m / (MEAL_COUNT - 1));
 }
 
+/* ---- the macaroni mascot ---------------------------------------------- */
+static void draw_mascot(float x, float base_y, bool cheer, bool party)
+{
+    float t = g_anim / 60.0f;
+    float bounce = cheer ? fabsf(sinf(t * 7.0f)) * 6.0f : fabsf(sinf(t * 2.2f)) * 2.0f;
+    float y = base_y - bounce;
+    u32 outline = C2D_Color32(0xc2, 0x74, 0x0c, 0xff);
+    u32 body = C2D_Color32(0xff, 0xc9, 0x47, 0xff);
+    u32 shine = C2D_Color32(0xff, 0xe9, 0xa8, 0xff);
+    u32 hole = C2D_Color32(0x9a, 0x55, 0x08, 0xff);
+    u32 ink = C2D_Color32(0x3b, 0x1f, 0x0a, 0xff);
+    u32 cheek = C2D_Color32(0xff, 0x7a, 0x9a, 0xb0);
+    const float R = 15, TUBE = 9.5f, DEG = 3.14159265f / 180.0f;
+
+    /* shadow on the "floor" shrinks while jumping */
+    float sw = 30 - bounce * 1.5f;
+    C2D_DrawEllipseSolid(x - sw / 2, base_y + 16, 0.42f, sw, 5, C2D_Color32(0, 0, 0, 0x50));
+
+    /* the elbow: an arch of circles, outline first */
+    for (int a = 185; a <= 355; a += 5)
+        C2D_DrawCircleSolid(x + R * cosf(a * DEG), y + R * sinf(a * DEG), 0.43f, TUBE + 1.6f, outline);
+    for (int a = 185; a <= 355; a += 5)
+        C2D_DrawCircleSolid(x + R * cosf(a * DEG), y + R * sinf(a * DEG), 0.44f, TUBE, body);
+    /* ridges */
+    for (int a = 205; a <= 335; a += 26)
+        C2D_DrawLine(x + (R - TUBE + 2) * cosf(a * DEG), y + (R - TUBE + 2) * sinf(a * DEG), outline,
+                     x + (R + TUBE - 2) * cosf(a * DEG), y + (R + TUBE - 2) * sinf(a * DEG), outline, 1.0f,
+                     0.45f);
+    for (int a = 215; a <= 255; a += 5)
+        C2D_DrawCircleSolid(x + (R + 4.5f) * cosf(a * DEG), y + (R + 4.5f) * sinf(a * DEG), 0.46f, 2.0f, shine);
+    /* the open ends */
+    C2D_DrawEllipseSolid(x - R - TUBE + 1, y + 2, 0.46f, 2 * TUBE - 2, 7, outline);
+    C2D_DrawEllipseSolid(x - R - TUBE + 3, y + 3.5f, 0.47f, 2 * TUBE - 6, 4, hole);
+    C2D_DrawEllipseSolid(x + R - TUBE + 1, y + 2, 0.46f, 2 * TUBE - 2, 7, outline);
+    C2D_DrawEllipseSolid(x + R - TUBE + 3, y + 3.5f, 0.47f, 2 * TUBE - 6, 4, hole);
+
+    /* face on top of the arch */
+    float fy = y - R + 1;
+    bool blink = fmodf(t, 4.0f) < 0.12f;
+    for (int side = -1; side <= 1; side += 2) {
+        float ex = x + side * 5.5f;
+        if (blink) {
+            C2D_DrawLine(ex - 2, fy - 2, ink, ex + 2, fy - 2, ink, 1.2f, 0.48f);
+        } else if (cheer) { /* happy closed eyes: ^ ^ */
+            C2D_DrawLine(ex - 2.2f, fy - 1, ink, ex, fy - 3.5f, ink, 1.2f, 0.48f);
+            C2D_DrawLine(ex, fy - 3.5f, ink, ex + 2.2f, fy - 1, ink, 1.2f, 0.48f);
+        } else {
+            C2D_DrawCircleSolid(ex, fy - 2, 0.48f, 2.1f, ink);
+            C2D_DrawCircleSolid(ex + 0.7f, fy - 2.8f, 0.49f, 0.8f, C_TEXT);
+        }
+        C2D_DrawCircleSolid(x + side * 9.5f, fy + 2, 0.48f, 2.0f, cheek);
+    }
+    if (cheer) {
+        C2D_DrawEllipseSolid(x - 3, fy + 1, 0.48f, 6, 5, ink);
+        C2D_DrawEllipseSolid(x - 1.5f, fy + 3.5f, 0.49f, 3, 2, C_WARN);
+    } else {
+        for (int a = 30; a <= 150; a += 15)
+            C2D_DrawCircleSolid(x + 3 * cosf(a * DEG), fy + 0.5f + 2.5f * sinf(a * DEG), 0.48f, 0.7f, ink);
+    }
+
+    /* little arms: waving when cheering */
+    float wave = cheer ? sinf(t * 14.0f) * 3 : 0;
+    float ay = cheer ? -14 : 6;
+    C2D_DrawLine(x - R - TUBE + 2, y - 2, outline, x - R - TUBE - 6, y + ay + wave, outline, 2.0f, 0.42f);
+    C2D_DrawLine(x + R + TUBE - 2, y - 2, outline, x + R + TUBE + 6, y + ay - wave, outline, 2.0f, 0.42f);
+    C2D_DrawCircleSolid(x - R - TUBE - 6, y + ay + wave, 0.43f, 2.2f, body);
+    C2D_DrawCircleSolid(x + R + TUBE + 6, y + ay - wave, 0.43f, 2.2f, body);
+
+    if (cheer) { /* sparkles */
+        for (int i = 0; i < 3; i++) {
+            float a = t * 2.5f + i * 2.1f;
+            float sx = x + cosf(a) * 30, sy = y - 8 + sinf(a) * 14;
+            C2D_DrawLine(sx - 2.5f, sy, C_MINT, sx + 2.5f, sy, C_MINT, 1.0f, 0.5f);
+            C2D_DrawLine(sx, sy - 2.5f, C_MINT, sx, sy + 2.5f, C_MINT, 1.0f, 0.5f);
+        }
+    }
+
+    if (party) { /* a striped party hat for a 3+ day streak */
+        float hx = x + 1, hy = y - R - TUBE + 2;
+        u32 pink = C2D_Color32(0xf4, 0x72, 0xb6, 0xff), sky = C2D_Color32(0x60, 0xa5, 0xfa, 0xff);
+        C2D_DrawTriangle(hx - 7, hy, pink, hx + 7, hy, sky, hx + 3, hy - 17, pink, 0.5f);
+        C2D_DrawLine(hx - 4.5f, hy - 5, C_TEXT, hx + 5.5f, hy - 5, C_TEXT, 1.2f, 0.51f);
+        C2D_DrawLine(hx - 1.5f, hy - 11, C_TEXT, hx + 4.5f, hy - 11, C_TEXT, 1.2f, 0.51f);
+        C2D_DrawCircleSolid(hx + 3, hy - 17, 0.52f, 2.5f, C2D_Color32(0xfd, 0xe0, 0x47, 0xff));
+    }
+}
+
+static void water_drop(float x, float y, u32 color)
+{
+    C2D_DrawCircleSolid(x, y + 2, 0.5f, 3.5f, color);
+    C2D_DrawTriangle(x - 3.3f, y + 1, color, x + 3.3f, y + 1, color, x, y - 5, color, 0.5f);
+}
+
+static void flame(float x, float y, bool lit)
+{
+    u32 outer = lit ? C2D_Color32(0xfb, 0x92, 0x3c, 0xff) : C_BAR_BG;
+    u32 inner = lit ? C2D_Color32(0xfd, 0xe0, 0x47, 0xff) : C_PANEL2;
+    C2D_DrawCircleSolid(x, y + 2, 0.5f, 4.0f, outer);
+    C2D_DrawTriangle(x - 3.8f, y + 1, outer, x + 3.8f, y + 1, outer, x + 1, y - 7, outer, 0.5f);
+    C2D_DrawCircleSolid(x, y + 3, 0.51f, 2.0f, inner);
+}
+
+/* Progress toward a micronutrient goal. Going past a goal (fiber, iron...)
+ * is fine and stays green; only limits (sugar, sodium...) turn red. */
+static void micro_bar(float x, float y, float w, float h, Micro m, float value, float target)
+{
+    if (micro_info(m)->limit) {
+        bar(x, y, w, h, value, target, C_TURQ);
+        return;
+    }
+    rrect(x, y, w, h, h / 2, C_BAR_BG);
+    if (target <= 0 || value <= 0)
+        return;
+    float frac = value / target;
+    if (frac > 1)
+        frac = 1;
+    float fw = w * frac < h ? h : w * frac;
+    rrect(x, y, fw, h, h / 2, frac >= 1 ? C_GREEN : C_TURQ);
+}
+
+static void micro_value(char *out, size_t size, float v)
+{
+    if (v >= 100 || v == 0)
+        snprintf(out, size, "%.0f", v);
+    else if (v >= 10)
+        snprintf(out, size, "%.0f", v);
+    else
+        snprintf(out, size, "%.1f", v);
+}
+
 static void draw_top_today(void)
 {
     Totals t = sum_entries(g_day.entries, g_day.count, -1);
     bool is_today = strcmp(g_day.date, g_today) == 0;
-    C2D_DrawRectSolid(0, 0, 0.4f, TOP_W, 70, C_PANEL);
-    grad_rect(0, 68, TOP_W, 2, 0, 1);
-    text(10, 6, 0.6f, C_TEXT, 0, "%s%s", g_day.date, is_today ? "  (today)" : "");
-    text(TOP_W - 10, 6, 0.6f, t.kcal > g_targets.kcal ? C_WARN : C_TURQ, C2D_AlignRight,
-         "%.0f / %.0f kcal", t.kcal, g_targets.kcal);
-    bar(10, 28, TOP_W - 20, 9, t.kcal, g_targets.kcal, C_GRAD);
+    bool female = g_profile.sex == SEX_FEMALE;
+    const float L = 322; /* right edge of the numbers; the mascot lives right of it */
+    C2D_DrawRectSolid(0, 0, 0.4f, TOP_W, 98, C_PANEL);
+    grad_rect(0, 96, TOP_W, 2, 0, 1);
+    text(10, 5, 0.55f, C_TEXT, 0, "%s%s", g_day.date, is_today ? "  (today)" : "");
+    text(L, 5, 0.55f, t.kcal > g_targets.kcal ? C_WARN : C_TURQ, C2D_AlignRight, "%.0f / %.0f kcal", t.kcal,
+         g_targets.kcal);
+    bar(10, 24, L - 10, 8, t.kcal, g_targets.kcal, C_GRAD);
 
-    float col = (TOP_W - 20) / 3.0f;
-    text(10, 41, 0.45f, C_TEXT, 0, "Protein %.0f/%.0f g", t.protein, g_targets.protein);
-    text(10 + col, 41, 0.45f, C_TEXT, 0, "Carbs %.0f/%.0f g", t.carbs, g_targets.carbs);
-    text(10 + 2 * col, 41, 0.45f, C_TEXT, 0, "Fat %.0f/%.0f g", t.fat, g_targets.fat);
-    bar(10, 57, col - 8, 6, t.protein, g_targets.protein, C_PROTEIN);
-    bar(10 + col, 57, col - 8, 6, t.carbs, g_targets.carbs, C_CARBS);
-    bar(10 + 2 * col, 57, col - 8, 6, t.fat, g_targets.fat, C_FAT);
+    float col = (L - 10) / 3.0f;
+    text(10, 35, 0.42f, C_TEXT, 0, "Protein %.0f/%.0f g", t.protein, g_targets.protein);
+    text(10 + col, 35, 0.42f, C_TEXT, 0, "Carbs %.0f/%.0f g", t.carbs, g_targets.carbs);
+    text(10 + 2 * col, 35, 0.42f, C_TEXT, 0, "Fat %.0f/%.0f g", t.fat, g_targets.fat);
+    bar(10, 49, col - 8, 5, t.protein, g_targets.protein, C_PROTEIN);
+    bar(10 + col, 49, col - 8, 5, t.carbs, g_targets.carbs, C_CARBS);
+    bar(10 + 2 * col, 49, col - 8, 5, t.fat, g_targets.fat, C_FAT);
 
-    float y = 76;
+    /* key micronutrients, a bit smaller */
+    float mc = (L - 10) / MICRO_KEY_COUNT;
+    for (int i = 0; i < MICRO_KEY_COUNT; i++) {
+        const MicroInfo *mi = micro_info((Micro)i);
+        float target = micro_target((Micro)i, female, g_profile.age);
+        float x = 10 + i * mc;
+        char v[16], tg[16];
+        micro_value(v, sizeof v, t.micro[i]);
+        micro_value(tg, sizeof tg, target);
+        text(x, 59, 0.36f, C_MUTED, 0, "%s%s", mi->name, mi->limit ? " (max)" : "");
+        text(x, 70, 0.36f, C_TEXT, 0, "%s/%s %s", v, tg, mi->unit);
+        micro_bar(x, 83, mc - 8, 3, (Micro)i, t.micro[i], target);
+    }
+
+    /* mascot, water and streak on the right */
+    int streak = streak_now();
+    bool protein_hit = g_targets.protein > 0 && t.protein >= g_targets.protein;
+    if (g_cheer > 0)
+        g_cheer--;
+    draw_mascot(364, 36, g_cheer > 0 || protein_hit, streak >= 3);
+    int glasses = water_glasses();
+    water_drop(338, 68, glasses >= water_goal() ? C_BLUE : C_TURQ);
+    text(347, 62, 0.4f, C_TEXT, 0, "%d/%d", glasses, water_goal());
+    flame(338, 84, streak > 0);
+    text(347, 78, 0.4f, streak > 0 ? C_TEXT : C_MUTED, 0, "%d day%s", streak, streak == 1 ? "" : "s");
+
+    float y = 102;
     if (g_day.count == 0) {
-        rrect(40, y + 30, TOP_W - 80, 60, 12, C_PANEL);
-        text(TOP_W / 2, y + 40, 0.6f, C_TURQ, C2D_AlignCenter, "Nothing logged yet!");
-        text(TOP_W / 2, y + 62, 0.45f, C_MUTED, C2D_AlignCenter, "A to search, or tap Quick add");
+        rrect(40, y + 24, TOP_W - 80, 60, 12, C_PANEL);
+        text(TOP_W / 2, y + 34, 0.6f, C_TURQ, C2D_AlignCenter, "Nothing logged yet!");
+        text(TOP_W / 2, y + 56, 0.45f, C_MUTED, C2D_AlignCenter, "A to search, Scan a barcode, or Quick add");
         return;
     }
     int rows = visible_rows(TAB_TODAY);
@@ -1324,8 +1888,11 @@ static void draw_top_today(void)
         char right[40];
         if (e->quick)
             snprintf(right, sizeof right, "quick  %.0f kcal", et.kcal);
-        else
-            snprintf(right, sizeof right, "%.0f g  %.0f kcal", e->grams, et.kcal);
+        else {
+            char amt[32];
+            amount_text(e, amt, sizeof amt);
+            snprintf(right, sizeof right, "%s  %.0f kcal", amt, et.kcal);
+        }
         float ry = y + row * ROW_H;
         food_row(ry, idx == g_sel[TAB_TODAY], e->food.name, e->quick ? "" : e->food.brand,
                  !e->quick && is_fav(&e->food), right, meal_color(e->meal));
@@ -1333,6 +1900,81 @@ static void draw_top_today(void)
         C2D_DrawRectSolid(4, ry + 2, 0.5f, 3, ROW_H - 5, meal_color(e->meal));
     }
     scroll_hint(y + rows * ROW_H + 1, g_scroll[TAB_TODAY], rows, (int)g_day.count);
+}
+
+static void draw_top_micros(void)
+{
+    Totals t = sum_entries(g_day.entries, g_day.count, -1);
+    bool female = g_profile.sex == SEX_FEMALE;
+    char title[48];
+    snprintf(title, sizeof title, "All micronutrients  -  %s", g_day.date);
+    header(title, "< >");
+    for (int i = 0; i < MICRO_COUNT; i++) {
+        const MicroInfo *mi = micro_info((Micro)i);
+        float target = micro_target((Micro)i, female, g_profile.age);
+        float y = 27 + i * 14.6f;
+        if (i % 2 == 0)
+            rrect(4, y - 1, TOP_W - 8, 14, 4, C_PANEL);
+        text(12, y, 0.43f, i < MICRO_KEY_COUNT ? C_TEXT : C_MUTED, 0, "%s", mi->name);
+        micro_bar(118, y + 4, 150, 5, (Micro)i, t.micro[i], target);
+        char v[16], tg[16];
+        micro_value(v, sizeof v, t.micro[i]);
+        micro_value(tg, sizeof tg, target);
+        text(TOP_W - 12, y, 0.43f, C_TEXT, C2D_AlignRight, "%s / %s%s %s", v, mi->limit ? "max " : "", tg,
+             mi->unit);
+    }
+}
+
+static void draw_unit_picker(void)
+{
+    char title[80];
+    snprintf(title, sizeof title, "How much %.40s?", g_unit_food.name);
+    header(title, NULL);
+    for (int i = 0; i < g_unit_n; i++) {
+        float y = 34 + i * 22;
+        bool on = i == g_unit_sel;
+        if (on) {
+            rrect(4, y - 3, TOP_W - 8, 20, 6, C_PANEL2);
+            C2D_DrawRectSolid(4, y - 3, 0.45f, 3, 20, grad((float)i / (UNIT_COUNT - 1)));
+        }
+        char label[64];
+        unit_choice_text(&g_unit_food, g_unit_opts[i], label, sizeof label);
+        text(16, y, 0.52f, on ? C_TEXT : C_MUTED, 0, "%s", label);
+        Entry e;
+        memset(&e, 0, sizeof e);
+        e.food = g_unit_food;
+        e.grams = unit_grams(&g_unit_food, g_unit_opts[i]);
+        if (g_unit_opts[i] == UNIT_GRAMS)
+            e.grams = 100;
+        text(TOP_W - 12, y + 1, 0.45f, C_MUTED, C2D_AlignRight, "%s%.0f kcal",
+             g_unit_opts[i] == UNIT_GRAMS ? "100 g: " : "1: ", entry_totals(&e).kcal);
+    }
+    if (g_unit_food.serving_g <= 0)
+        text(TOP_W / 2, 34 + g_unit_n * 22 + 8, 0.42f, C_MUTED, C2D_AlignCenter,
+             "This product doesn't list a serving size, so servings are off");
+}
+
+static void draw_top_scanner(void)
+{
+    C2D_DrawImageAt(scanner_image(), 0, 0, 0.3f, NULL, 1.0f, 1.0f);
+    /* frame the scan area and draw the guide line */
+    u32 dim = C2D_Color32(0, 0, 0, 0x70);
+    C2D_DrawRectSolid(0, 0, 0.4f, TOP_W, 70, dim);
+    C2D_DrawRectSolid(0, 170, 0.4f, TOP_W, 70, dim);
+    float pulse = 0.5f + 0.5f * sinf(g_anim / 8.0f);
+    C2D_DrawRectSolid(30, 119, 0.5f, TOP_W - 60, 2, C2D_Color32(0xfb, 0x71, 0x85, (u8)(120 + 120 * pulse)));
+    u32 c = C_TURQ;
+    float x0 = 30, x1 = TOP_W - 30, y0 = 74, y1 = 166, k = 14;
+    C2D_DrawRectSolid(x0, y0, 0.5f, k, 3, c);
+    C2D_DrawRectSolid(x0, y0, 0.5f, 3, k, c);
+    C2D_DrawRectSolid(x1 - k, y0, 0.5f, k, 3, c);
+    C2D_DrawRectSolid(x1 - 3, y0, 0.5f, 3, k, c);
+    C2D_DrawRectSolid(x0, y1 - 3, 0.5f, k, 3, c);
+    C2D_DrawRectSolid(x0, y1 - k, 0.5f, 3, k, c);
+    C2D_DrawRectSolid(x1 - k, y1 - 3, 0.5f, k, 3, c);
+    C2D_DrawRectSolid(x1 - 3, y1 - k, 0.5f, 3, k, c);
+    text(TOP_W / 2, 24, 0.55f, C_TEXT, C2D_AlignCenter, "Line the barcode up with the red line");
+    text(TOP_W / 2, 196, 0.45f, C_MINT, C2D_AlignCenter, "Hold it flat and still, a hand's length away");
 }
 
 static void draw_food_list(const Food *foods, int count, int sel, int scroll, float y0, u32 accent)
@@ -1455,8 +2097,11 @@ static void entry_right(const Entry *e, char *out, size_t size)
 {
     if (e->quick)
         snprintf(out, size, "quick  %.0f kcal", entry_totals(e).kcal);
-    else
-        snprintf(out, size, "%.0f g  %.0f kcal", e->grams, entry_totals(e).kcal);
+    else {
+        char amt[32];
+        amount_text(e, amt, sizeof amt);
+        snprintf(out, size, "%s  %.0f kcal", amt, entry_totals(e).kcal);
+    }
 }
 
 static void draw_top_meals(void)
@@ -1504,12 +2149,13 @@ static void draw_top_meals(void)
 }
 
 /* ---- profile, report, charts ------------------------------------------- */
-static const char *ROW_LABELS[PR_COUNT] = {"Age", "Sex", "Weight", "Height", "BMI", "Body fat",
-                                           "Activity", "Calories", "Protein", "Carbs", "Fat"};
+static const char *ROW_LABELS[PR_COUNT] = {"Age",      "Sex",        "Weight", "Height",   "BMI",
+                                           "Body fat", "Activity",   "Water",  "Sounds",   "Calories",
+                                           "Protein",  "Carbs",      "Fat"};
 
 static float profile_row_y(int row)
 {
-    return 28 + row * 16 + (row >= PR_KCAL ? 16 : 0);
+    return 27 + row * 15 + (row >= PR_KCAL ? 14 : 0);
 }
 
 static void profile_value(ProfileRow row, char *out, size_t size)
@@ -1541,6 +2187,8 @@ static void profile_value(ProfileRow row, char *out, size_t size)
         else snprintf(out, size, "not set");
         break;
     case PR_ACTIVITY: snprintf(out, size, "%s", activity_name(p->activity)); break;
+    case PR_WATER: snprintf(out, size, "%d glasses a day", water_goal()); break;
+    case PR_SOUNDS: snprintf(out, size, "%s", p->sounds_off ? "Off" : "On"); break;
     case PR_KCAL: snprintf(out, size, "%.0f kcal", g_targets.kcal); break;
     case PR_PROTEIN: snprintf(out, size, "%.0f g", g_targets.protein); break;
     case PR_CARBS: snprintf(out, size, "%.0f g", g_targets.carbs); break;
@@ -1552,13 +2200,13 @@ static void profile_value(ProfileRow row, char *out, size_t size)
 static void draw_page_profile(void)
 {
     header("Profile", "< Report  Charts >");
-    text(TOP_W - 10, profile_row_y(PR_KCAL) - 15, 0.42f, C_MUTED, C2D_AlignRight, "Daily targets");
+    text(142, profile_row_y(PR_KCAL) - 12, 0.38f, C_MUTED, 0, "Daily targets");
     for (int row = 0; row < PR_COUNT; row++) {
         float y = profile_row_y(row);
         bool on = row == g_sel[TAB_PROFILE];
         if (on) {
-            rrect(4, y - 1, TOP_W - 8, ROW_H + 1, 5, C_PANEL2);
-            C2D_DrawRectSolid(4, y - 1, 0.45f, 3, ROW_H + 1, grad((float)row / (PR_COUNT - 1)));
+            rrect(4, y - 1, TOP_W - 8, ROW_H, 5, C_PANEL2);
+            C2D_DrawRectSolid(4, y - 1, 0.45f, 3, ROW_H, grad((float)row / (PR_COUNT - 1)));
         }
         char value[48];
         profile_value((ProfileRow)row, value, sizeof value);
@@ -1573,9 +2221,7 @@ static void draw_page_report(void)
     char title[48];
     snprintf(title, sizeof title, "Report  -  %s", g_day.date);
     header(title, "< >");
-    float kg = series_latest(&g_weights, g_day.date);
-    if (kg <= 0)
-        kg = current_weight();
+    float kg = weight_for_day();
     float rest = bmr(&g_profile, kg);
     if (rest <= 0) {
         empty_card("Fill in your profile first", "Age, height and a weight are needed");
@@ -1583,8 +2229,9 @@ static void draw_page_report(void)
     }
     Totals t = sum_entries(g_day.entries, g_day.count, -1);
     float basic = rest * (activity_factor(g_profile.activity) - 1.0f);
-    float exercise = series_get(&g_exercise, g_day.date);
-    float burned = rest + basic + exercise;
+    float steps = steps_kcal(g_step_total, kg, g_profile.height_cm);
+    float workouts = workouts_total(&g_workouts);
+    float burned = rest + basic + workouts;
 
     /* two big numbers */
     float cw = (TOP_W - 30) / 2;
@@ -1615,8 +2262,11 @@ static void draw_page_report(void)
     text(20, y, 0.45f, C_MUTED, 0, "Basic activity (%s)", activity_name(g_profile.activity));
     text(TOP_W - 12, y, 0.45f, C_TEXT, C2D_AlignRight, "%.0f kcal", basic);
     y += 14;
-    text(20, y, 0.45f, C_MUTED, 0, "Exercise");
-    text(TOP_W - 12, y, 0.45f, C_TEXT, C2D_AlignRight, "%.0f kcal", exercise);
+    text(20, y, 0.45f, C_MUTED, 0, "Workouts (%d)", (int)g_workouts.count);
+    text(TOP_W - 12, y, 0.45f, C_TEXT, C2D_AlignRight, "%.0f kcal", workouts);
+    if (g_step_total > 0)
+        text(TOP_W - 12, 122, 0.4f, C_TURQ, C2D_AlignRight, "Heads up: %u steps = about %.0f kcal", g_step_total,
+             steps);
 
     /* where the eaten energy came from */
     y += 20;
@@ -1750,10 +2400,91 @@ static void draw_page_charts(void)
     }
 }
 
+static void draw_workout_picker(void)
+{
+    header("Add a workout", NULL);
+    float kg = weight_for_day();
+    for (int i = 0; i < WORKOUT_TYPE_COUNT; i++) {
+        float y = 28 + i * 17;
+        bool on = i == g_pick_sel;
+        if (on) {
+            rrect(4, y - 1, TOP_W - 8, 16, 5, C_PANEL2);
+            C2D_DrawRectSolid(4, y - 1, 0.45f, 3, 16, grad((float)i / (WORKOUT_TYPE_COUNT - 1)));
+        }
+        const WorkoutType *t = &WORKOUT_TYPES[i];
+        text(16, y, TEXT_SCALE, C_TEXT, 0, "%s", t->name);
+        if (t->met > 0 && kg > 0)
+            text(TOP_W - 12, y, TEXT_SCALE, C_MUTED, C2D_AlignRight, "about %.0f kcal / hour",
+                 workout_kcal(t->met, kg, 60));
+    }
+}
+
+static void draw_page_activity(void)
+{
+    if (g_picking) {
+        draw_workout_picker();
+        return;
+    }
+    char title[48];
+    snprintf(title, sizeof title, "Activity  -  %s", g_day.date);
+    header(title, "< >");
+    float kg = weight_for_day();
+
+    /* steps card with an hourly chart */
+    rrect(8, 28, TOP_W - 16, 88, 10, C_PANEL);
+    grad_rect(20, 28, TOP_W - 40, 3, 0, 1);
+    text(18, 36, 0.45f, C_MUTED, 0, "Steps");
+    text(18, 50, 0.8f, C_TEXT, 0, "%u", g_step_total);
+    if (kg > 0) {
+        text(TOP_W - 18, 36, 0.45f, C_MUTED, C2D_AlignRight, "about");
+        text(TOP_W - 18, 50, 0.7f, C_TURQ, C2D_AlignRight, "%.0f kcal",
+             steps_kcal(g_step_total, kg, g_profile.height_cm));
+    } else {
+        text(TOP_W - 18, 52, 0.45f, C_MUTED, C2D_AlignRight, "Log a weight to see kcal");
+    }
+    unsigned top = 1;
+    for (int h = 0; h < 24; h++)
+        if (g_step_hours[h] > top) top = g_step_hours[h];
+    float cx = 18, cw = (TOP_W - 36) / 24, base = 108, ch = 26;
+    if (g_steps_live) {
+        for (int h = 0; h < 24; h++) {
+            float bh = ch * g_step_hours[h] / top;
+            if (bh > 0)
+                C2D_DrawRectSolid(cx + h * cw + 1, base - bh, 0.4f, cw - 2, bh, grad(h / 23.0f));
+            else
+                C2D_DrawRectSolid(cx + h * cw + 1, base - 1, 0.4f, cw - 2, 1, C_BAR_BG);
+        }
+        text(cx, base + 1, 0.32f, C_MUTED, 0, "12am");
+        text(cx + 12 * cw, base + 1, 0.32f, C_MUTED, 0, "12pm");
+    } else {
+        text(TOP_W / 2, 86, 0.42f, C_MUTED, C2D_AlignCenter,
+             pedometer_available() ? "No steps counted for this day" : "Step counter not available here");
+    }
+
+    /* workouts */
+    text(10, 124, 0.5f, C_TEXT, 0, "Workouts");
+    text(TOP_W - 12, 124, 0.45f, C_TURQ, C2D_AlignRight, "%.0f kcal", workouts_total(&g_workouts));
+    if (g_workouts.count == 0) {
+        text(TOP_W / 2, 160, 0.45f, C_MUTED, C2D_AlignCenter, "A to add one: weights, running, soccer...");
+        return;
+    }
+    int first = g_workout_sel > 5 ? g_workout_sel - 5 : 0; /* 6 rows fit */
+    for (int i = first; i < (int)g_workouts.count && i < first + 6; i++) {
+        const Workout *w = &g_workouts.items[i];
+        char right[32];
+        if (w->minutes > 0)
+            snprintf(right, sizeof right, "%.0f min  %.0f kcal", w->minutes, w->kcal);
+        else
+            snprintf(right, sizeof right, "%.0f kcal", w->kcal);
+        food_row(142 + (i - first) * ROW_H, i == g_workout_sel, w->name, NULL, false, right, C_GREEN);
+    }
+}
+
 static void draw_top_profile(void)
 {
     switch (g_page) {
     case PAGE_PROFILE: draw_page_profile(); break;
+    case PAGE_ACTIVITY: draw_page_activity(); break;
     case PAGE_REPORT: draw_page_report(); break;
     default: draw_page_charts(); break;
     }
@@ -1771,7 +2502,10 @@ static void food_card(const Food *f, float grams, bool quick)
     card_bg();
     text(14, 12, 0.55f, C_TEXT, 0, "%.34s", f->name);
     if (!quick && f->brand[0])
-        text(14, 29, 0.45f, C_MUTED, 0, "%.40s", f->brand);
+        text(14, 29, 0.45f, C_MUTED, 0, "%.28s", f->brand);
+    if (!quick && f->serving_g > 0)
+        text(BOT_W - 14, 29, 0.42f, C_MUTED, C2D_AlignRight, "Serving: %.16s%s%.0f g", f->serving_label,
+             f->serving_label[0] ? " = " : "", f->serving_g);
     Entry e;
     memset(&e, 0, sizeof e);
     e.food = *f;
@@ -1781,6 +2515,21 @@ static void food_card(const Food *f, float grams, bool quick)
         text(14, 47, 0.5f, C_TURQ, 0, "%.0f kcal", t.kcal);
     else
         text(14, 47, 0.5f, C_TURQ, 0, "%.0f kcal in %.0f g", t.kcal, e.grams);
+    /* up to three key micronutrients this food lists */
+    char micros[64] = "";
+    int shown = 0;
+    for (int i = 0; i < MICRO_KEY_COUNT && shown < 3; i++) {
+        if (t.micro[i] <= 0)
+            continue;
+        char v[16];
+        micro_value(v, sizeof v, t.micro[i]);
+        size_t n = strlen(micros);
+        snprintf(micros + n, sizeof micros - n, "%s%s %s %s", shown ? "   " : "", micro_info((Micro)i)->name, v,
+                 micro_info((Micro)i)->unit);
+        shown++;
+    }
+    if (shown > 0)
+        text(BOT_W - 14, 49, 0.4f, C_MUTED, C2D_AlignRight, "%s", micros);
 
     /* three macro chips, green -> turquoise -> blue */
     float cw = (BOT_W - 12 - 16 - 16) / 3;
@@ -1821,6 +2570,8 @@ static const char *ROW_HELP[PR_COUNT] = {
     "Worked out from weight and height",
     "Optional, in percent",
     "A cycles: how active a normal day is",
+    "Glasses of 250 ml. ZR / ZL on Today add or remove one",
+    "A turns the little sound effects on or off",
     "Your daily calorie goal",
     "Your daily protein goal",
     "Your daily carbs goal",
@@ -1833,7 +2584,14 @@ static void draw_profile_details(void)
         int row = g_sel[TAB_PROFILE];
         hint_card(ROW_LABELS[row], ROW_HELP[row]);
     } else if (g_page == PAGE_REPORT) {
-        hint_card("Eaten vs burned", "Burned = resting + basic activity + exercise");
+        hint_card("Eaten vs burned", "Burned = resting + basic activity + workouts");
+    } else if (g_page == PAGE_ACTIVITY) {
+        if (g_picking)
+            hint_card("Pick a workout", "Calories use your weight and the minutes");
+        else if (!pedometer_available())
+            hint_card("Step counter not available", "Workouts still count");
+        else
+            hint_card("Steps are a heads-up", "Basic activity already covers them");
     } else {
         if (g_week_dirty)
             compute_week();
@@ -1864,11 +2622,23 @@ static void draw_details(void)
 {
     Tab t = g_tab;
     int count = list_count(t);
+    if (g_scanning) {
+        hint_card("Scanning for a barcode...", "Works with EAN-13, UPC-A and EAN-8 codes");
+        return;
+    }
+    if (g_unit_picking) {
+        food_card(&g_unit_food, g_unit_food.serving_g, false);
+        return;
+    }
+    if (t == TAB_TODAY && g_show_micros) {
+        hint_card("From the foods you logged", "Many foods don't list these, so real totals may be higher");
+        return;
+    }
     switch (t) {
     case TAB_TODAY: {
         Entry *e = selected_entry();
         if (e) food_card(&e->food, e->grams, e->quick);
-        else hint_card("Let's eat!", "A to search foods, or tap Quick add");
+        else hint_card("Let's eat!", "A to search, Scan a barcode, or tap Quick add");
         break;
     }
     case TAB_SEARCH:
@@ -1983,15 +2753,24 @@ int main(void)
     brands_load(&g_brands);
     profile_load(&g_profile);
     series_load(&g_weights, WEIGHTS_FILE);
-    series_load(&g_exercise, EXERCISE_FILE);
+    series_load(&g_steps, STEPS_FILE);
+    series_load(&g_water, WATER_FILE);
+    pedometer_init();
+    sound_init();
+    sound_enable(!g_profile.sounds_off);
     date_today(g_today);
     load_day(g_today);
+    compute_streak();
     g_slot = meal_for_now();
     if (!g_net_ok)
         status("No network: saved foods and favorites still work");
 
     while (aptMainLoop()) {
         hidScanInput();
+        /* steps keep coming in while the app is open */
+        static unsigned frames = 0;
+        if (++frames % 600 == 0 && g_tab == TAB_PROFILE && !g_picking)
+            refresh_activity();
         u32 down = hidKeysDown();
         layout_buttons();
         if (!handle_keys(down))
@@ -1999,13 +2778,33 @@ int main(void)
         if (down & KEY_TOUCH)
             handle_touch();
         layout_buttons(); /* the tab or state may have changed */
+        g_anim++;
+
+        if (g_scanning) {
+            char code[BARCODE_LEN];
+            if (scanner_frame(code)) {
+                stop_scan();
+                sound_play(SND_SCAN);
+                memcpy(g_barcode, code, BARCODE_LEN);
+                status("Got %s, looking it up...", code);
+                g_pending = PEND_PRODUCT;
+                layout_buttons();
+            }
+        }
 
         C2D_TextBufClear(g_textbuf);
         C3D_FrameBegin(C3D_FRAME_SYNCDRAW);
         C2D_TargetClear(top, C_BG);
         C2D_SceneBegin(top);
-        switch (g_tab) {
-        case TAB_TODAY: draw_top_today(); break;
+        if (g_scanning) {
+            draw_top_scanner();
+        } else if (g_unit_picking) {
+            draw_unit_picker();
+        } else switch (g_tab) {
+        case TAB_TODAY:
+            if (g_show_micros) draw_top_micros();
+            else draw_top_today();
+            break;
         case TAB_SEARCH: draw_top_search(); break;
         case TAB_BRANDS: draw_top_brands(); break;
         case TAB_FAVS: draw_top_favs(); break;
@@ -2024,11 +2823,17 @@ int main(void)
         } else if (g_pending == PEND_BRAND) {
             fetch_brand();
             g_pending = PEND_NONE;
+        } else if (g_pending == PEND_PRODUCT) {
+            lookup_product();
+            g_pending = PEND_NONE;
         }
     }
 
+    stop_scan();
+    sound_exit();
     C2D_TextBufDelete(g_textbuf);
     net_exit();
+    pedometer_exit();
     C2D_Fini();
     C3D_Fini();
     gfxExit();

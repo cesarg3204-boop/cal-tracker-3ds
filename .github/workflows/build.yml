@@ -73,10 +73,13 @@ jobs:
         with:
           name: cia-inputs
       - name: Make CIA
+        # Every build gets a higher version (from the run number) so the HOME
+        # menu sees an update and refreshes its cached banner and jingle.
         run: |
+          N=${{ github.run_number }}
           project_ctr/makerom/bin/makerom -f cia -o cal-pop.cia -target t -exefslogo \
             -elf cal-pop.elf -icon cal-pop.smdh -banner cal-pop.bnr -rsf meta/app.rsf \
-            -major 0 -minor 1 -micro 0 \
+            -major 1 -minor $(( (N / 16) % 64 )) -micro $(( N % 16 )) \
             -DAPP_TITLE="CalPop" \
             -DAPP_PRODUCT_CODE="CTR-H-CPOP" \
             -DAPP_UNIQUE_ID=0xFCA18 \

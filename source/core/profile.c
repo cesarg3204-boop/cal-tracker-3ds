@@ -93,6 +93,7 @@ int profile_load(UserProfile *p)
 {
     memset(p, 0, sizeof *p);
     p->activity = ACTIVITY_MODERATE;
+    p->water_goal = 8;
     char path[300];
     storage_path(path, sizeof path, "profile.json");
     char *text = read_all(path);
@@ -108,6 +109,9 @@ int profile_load(UserProfile *p)
     p->body_fat = num(root, "body_fat");
     int a = (int)num(root, "activity");
     p->activity = (a >= 0 && a < ACTIVITY_COUNT) ? (Activity)a : ACTIVITY_MODERATE;
+    int w = (int)num(root, "water_goal");
+    p->water_goal = w > 0 && w <= 30 ? w : 8;
+    p->sounds_off = num(root, "sounds_off") >= 1;
     cJSON_Delete(root);
     return 0;
 }
@@ -120,6 +124,8 @@ int profile_save(const UserProfile *p)
     cJSON_AddNumberToObject(root, "height_cm", p->height_cm);
     cJSON_AddNumberToObject(root, "body_fat", p->body_fat);
     cJSON_AddNumberToObject(root, "activity", p->activity);
+    cJSON_AddNumberToObject(root, "water_goal", p->water_goal);
+    cJSON_AddNumberToObject(root, "sounds_off", p->sounds_off);
     char path[300];
     storage_path(path, sizeof path, "profile.json");
     return write_all(path, root);
@@ -211,4 +217,26 @@ float series_latest(const Series *s, const char *date)
             return p->value;
     }
     return 0;
+}
+
+int goal_day(float kcal, float protein, float kcal_target, float protein_target)
+{
+    if (kcal_target <= 0 || kcal <= 0)
+        return 0;
+    float r = kcal / kcal_target;
+    if (r < 0.9f || r > 1.1f)
+        return 0;
+    return protein_target <= 0 || protein >= protein_target * 0.9f;
+}
+
+int streak_before(const char *today, int (*hit)(const char *date, void *ctx), void *ctx, int max_days)
+{
+    char date[CT_DATE_LEN];
+    int n = 0;
+    for (int back = 1; back <= max_days; back++) {
+        if (date_add_days(today, -back, date) != 0 || !hit(date, ctx))
+            break;
+        n++;
+    }
+    return n;
 }
