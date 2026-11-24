@@ -112,13 +112,14 @@ def rounded(img, radius):
     return out
 
 
-def jingle(path, rate=32000):
+def jingle(path, rate=22050):
     """An original little ocarina-style tune over a rolled harp chord, with
-    a soft room echo (about 2.8 s). The melody is our own (G major)."""
+    a soft room echo (about 2.4 s, kept short and small so the HOME menu
+    accepts it). The melody is our own (G major)."""
     import random
 
     rnd = random.Random(7)
-    dur_total = 2.8
+    dur_total = 2.4
     n = int(rate * dur_total)
     out = [0.0] * n
 
@@ -168,15 +169,15 @@ def jingle(path, rate=32000):
     for k, note in enumerate(["G3", "D4", "G4", "B4"]):
         harp(0.02 + k * 0.05, note, 0.16)
     for k, note in enumerate(["C4", "E4", "G4"]):
-        harp(0.95 + k * 0.05, note, 0.12)
+        harp(0.82 + k * 0.05, note, 0.12)
     for k, note in enumerate(["G3", "B3", "D4", "G4"]):
-        harp(1.45 + k * 0.06, note, 0.15)
+        harp(1.27 + k * 0.06, note, 0.15)
 
     # the tune: an original phrase that climbs, turns and settles home
     melody = [
-        (0.10, 0.20, "D5"), (0.32, 0.20, "G5"), (0.54, 0.36, "B5"),
-        (0.92, 0.16, "C6"), (1.09, 0.16, "B5"), (1.26, 0.18, "G5"),
-        (1.46, 0.30, "A5"), (1.78, 0.80, "G5"),
+        (0.08, 0.18, "D5"), (0.28, 0.18, "G5"), (0.48, 0.30, "B5"),
+        (0.81, 0.14, "C6"), (0.96, 0.14, "B5"), (1.11, 0.16, "G5"),
+        (1.28, 0.26, "A5"), (1.56, 0.62, "G5"),
     ]
     for start, dur, note in melody:
         ocarina(start, dur, note, 0.42)

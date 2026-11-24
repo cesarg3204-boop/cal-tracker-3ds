@@ -146,6 +146,9 @@ typedef enum {
     ACT_MICROS_BACK,
     ACT_UNIT_CHOOSE,
     ACT_UNIT_CANCEL,
+    ACT_TYPE_CODE,
+    ACT_CODE_CHOOSE,
+    ACT_CODE_CANCEL,
 } Action;
 
 typedef struct {
@@ -229,6 +232,10 @@ static Food g_unit_food;
 static Unit g_unit_opts[UNIT_COUNT];
 static int g_unit_n = 0, g_unit_sel = 0;
 
+/* Typing a barcode in: pick its type, then the digits */
+static bool g_code_picking = false;
+static int g_code_sel = 0;
+
 /* ---- drawing helpers ---------------------------------------------------- */
 static void text(float x, float y, float scale, u32 color, u32 flags, const char *fmt, ...)
 {
@@ -240,6 +247,26 @@ static void text(float x, float y, float scale, u32 color, u32 flags, const char
     C2D_Text t;
     C2D_TextParse(&t, g_textbuf, buf);
     C2D_TextOptimize(&t);
+    C2D_DrawText(&t, C2D_WithColor | flags, x, y, 0.5f, scale, scale, color);
+}
+
+/* Like text(), but shrinks the text (down to 70%) so it fits in max_w. */
+static void text_fit(float x, float y, float scale, float max_w, u32 color, u32 flags, const char *fmt, ...)
+{
+    char buf[160];
+    va_list ap;
+    va_start(ap, fmt);
+    vsnprintf(buf, sizeof buf, fmt, ap);
+    va_end(ap);
+    C2D_Text t;
+    C2D_TextParse(&t, g_textbuf, buf);
+    C2D_TextOptimize(&t);
+    float w = 0, h = 0;
+    C2D_TextGetDimensions(&t, scale, scale, &w, &h);
+    if (w > max_w && w > 0) {
+        float s2 = scale * max_w / w;
+        scale = s2 < scale * 0.7f ? scale * 0.7f : s2;
+    }
     C2D_DrawText(&t, C2D_WithColor | flags, x, y, 0.5f, scale, scale, color);
 }
 
@@ -920,6 +947,50 @@ static void stop_scan(void)
     g_scanning = false;
 }
 
+static bool prompt_digits(const char *hint, char *out, size_t size, int max_len)
+{
+    SwkbdState kb;
+    swkbdInit(&kb, SWKBD_TYPE_NUMPAD, 2, max_len);
+    swkbdSetHintText(&kb, hint);
+    swkbdSetValidation(&kb, SWKBD_NOTEMPTY_NOTBLANK, 0, 0);
+    return swkbdInputText(&kb, out, size) == SWKBD_BUTTON_RIGHT;
+}
+
+static void start_type_code(void)
+{
+    if (!g_net_ok) {
+        status("Looking up a barcode needs the internet");
+        return;
+    }
+    if (g_scanning)
+        stop_scan();
+    g_code_picking = true;
+}
+
+/* After picking the type: ask for the digits, check them, look them up. */
+static void code_type_chosen(void)
+{
+    CodeType type = (CodeType)g_code_sel;
+    g_code_picking = false;
+    char hint[64], typed[24] = "", code[BARCODE_LEN];
+    snprintf(hint, sizeof hint, "Type the %d numbers under the barcode", code_type_digits(type));
+    if (!prompt_digits(hint, typed, sizeof typed, 16))
+        return;
+    int rc = barcode_from_typed(type, typed, code);
+    if (rc == 0) {
+        status("%s needs exactly %d numbers. Try again", type == CODE_EAN13 ? "EAN-13" : type == CODE_UPCA ? "UPC-A" : "EAN-8",
+               code_type_digits(type));
+        return;
+    }
+    if (rc < 0) {
+        status("Those numbers don't add up. Check for a typo");
+        return;
+    }
+    memcpy(g_barcode, code, BARCODE_LEN);
+    status("Looking up %s...", code);
+    g_pending = PEND_PRODUCT;
+}
+
 /* Looks up g_barcode on Open Food Facts and shows it in Search. */
 static void lookup_product(void)
 {
@@ -930,7 +1001,11 @@ static void lookup_product(void)
     }
     char *body = NULL;
     if (net_get(url, &body, err, sizeof err) != 0) {
-        status("Lookup failed: %s", err);
+        /* Open Food Facts answers 404 for products it doesn't have */
+        if (strstr(err, "HTTP 404"))
+            status("%s isn't in Open Food Facts yet. Try Search or Quick add", g_barcode);
+        else
+            status("Lookup failed: %s", err);
         return;
     }
     Food f;
@@ -1157,6 +1232,12 @@ static void do_action(Action a)
             unit_chosen();
         break;
     case ACT_UNIT_CANCEL: g_unit_picking = false; break;
+    case ACT_TYPE_CODE: start_type_code(); break;
+    case ACT_CODE_CHOOSE:
+        if (g_code_picking)
+            code_type_chosen();
+        break;
+    case ACT_CODE_CANCEL: g_code_picking = false; break;
     case ACT_NEXT_WEEK: shift_day(WEEK); break;
     case ACT_TODAY:
         load_day(g_today);
@@ -1352,8 +1433,18 @@ static bool handle_keys(u32 down)
     if (down & KEY_START)
         return false;
     if (g_scanning) {
-        if (down & (KEY_B | KEY_START))
+        if (down & KEY_B)
             do_action(ACT_SCAN_CANCEL);
+        if (down & KEY_X)
+            do_action(ACT_TYPE_CODE);
+        return true;
+    }
+    if (g_code_picking) {
+        int dummy = 0;
+        if (down & KEY_DUP) move_sel(&g_code_sel, &dummy, -1, CODE_TYPE_COUNT, CODE_TYPE_COUNT);
+        if (down & KEY_DDOWN) move_sel(&g_code_sel, &dummy, 1, CODE_TYPE_COUNT, CODE_TYPE_COUNT);
+        if (down & KEY_A) do_action(ACT_CODE_CHOOSE);
+        if (down & KEY_B) do_action(ACT_CODE_CANCEL);
         return true;
     }
     if (g_unit_picking) {
@@ -1507,7 +1598,13 @@ static void layout_buttons(void)
     float w4 = (BOT_W - 8 * 5) / 4; /* four per row */
 
     if (g_scanning) {
+        add_button(x0, r1, w3, BTN_H, "X  Type it in", C_GRAD, ACT_TYPE_CODE);
         add_button(x1, r1, w3, BTN_H, "B  Cancel", C_PANEL2, ACT_SCAN_CANCEL);
+        return;
+    }
+    if (g_code_picking) {
+        add_button(x0, r1, w3, BTN_H, "A  Choose", C_GRAD, ACT_CODE_CHOOSE);
+        add_button(x1, r1, w3, BTN_H, "B  Cancel", C_PANEL2, ACT_CODE_CANCEL);
         return;
     }
     if (g_unit_picking) {
@@ -1541,6 +1638,7 @@ static void layout_buttons(void)
         if (g_have_results)
             add_button(x0, r1, w3, BTN_H, "B  Recent", C_PANEL2, ACT_BACK);
         add_button(x1, r1, w3, BTN_H, "Scan barcode", C_GRAD, ACT_SCAN);
+        add_button(x2, r1, w3, BTN_H, "Type barcode", C_GRAD, ACT_TYPE_CODE);
         break;
     case TAB_BRANDS:
         if (g_brand_open < 0) {
@@ -1612,7 +1710,7 @@ static void layout_buttons(void)
 /* What sits in the row above the tab bar. */
 static bool slot_row_visible(void)
 {
-    return !g_building && !g_scanning && !g_unit_picking && !g_show_micros && g_tab != TAB_PROFILE &&
+    return !g_building && !g_scanning && !g_unit_picking && !g_code_picking && !g_show_micros && g_tab != TAB_PROFILE &&
            !(g_tab == TAB_BRANDS && g_brand_open < 0);
 }
 
@@ -1627,7 +1725,7 @@ static void handle_touch(void)
     hidTouchRead(&tp);
     float x = tp.px, y = tp.py;
 
-    if (y >= TAB_Y && !g_scanning && !g_unit_picking) {
+    if (y >= TAB_Y && !g_scanning && !g_unit_picking && !g_code_picking) {
         int t = (int)(x / (BOT_W / TAB_COUNT));
         if (t >= 0 && t < TAB_COUNT)
             switch_tab((Tab)t);
@@ -1677,10 +1775,11 @@ static void food_row(float y, bool selected, const char *name, const char *brand
     }
     if (fav)
         fav_dot(13, y + 7);
+    /* keep the name clear of the value on the right */
     if (brand && brand[0])
-        text(20, y, TEXT_SCALE, C_TEXT, 0, "%.28s  (%.14s)", name, brand);
+        text_fit(20, y, TEXT_SCALE, TOP_W - 145, C_TEXT, 0, "%.28s  (%.14s)", name, brand);
     else
-        text(20, y, TEXT_SCALE, C_TEXT, 0, "%.40s", name);
+        text_fit(20, y, TEXT_SCALE, TOP_W - 145, C_TEXT, 0, "%.40s", name);
     text(TOP_W - 10, y, TEXT_SCALE, C_MUTED, C2D_AlignRight, "%s", right);
 }
 
@@ -1954,6 +2053,22 @@ static void draw_unit_picker(void)
              "This product doesn't list a serving size, so servings are off");
 }
 
+static void draw_code_picker(void)
+{
+    header("Type a barcode", NULL);
+    text(TOP_W / 2, 30, 0.45f, C_MUTED, C2D_AlignCenter, "Which kind is it? Count the numbers under the bars");
+    for (int i = 0; i < CODE_TYPE_COUNT; i++) {
+        float y = 56 + i * 26;
+        bool on = i == g_code_sel;
+        if (on) {
+            rrect(4, y - 4, TOP_W - 8, 22, 6, C_PANEL2);
+            C2D_DrawRectSolid(4, y - 4, 0.45f, 3, 22, grad((float)i / (CODE_TYPE_COUNT - 1)));
+        }
+        text(16, y, 0.52f, on ? C_TEXT : C_MUTED, 0, "%s", CODE_TYPE_NAMES[i]);
+    }
+    text(TOP_W / 2, 150, 0.42f, C_MUTED, C2D_AlignCenter, "Not sure? 13 numbers is EAN-13, 12 is UPC-A, 8 is EAN-8");
+}
+
 static void draw_top_scanner(void)
 {
     C2D_DrawImageAt(scanner_image(), 0, 0, 0.3f, NULL, 1.0f, 1.0f);
@@ -1975,6 +2090,7 @@ static void draw_top_scanner(void)
     C2D_DrawRectSolid(x1 - 3, y1 - k, 0.5f, 3, k, c);
     text(TOP_W / 2, 24, 0.55f, C_TEXT, C2D_AlignCenter, "Line the barcode up with the red line");
     text(TOP_W / 2, 196, 0.45f, C_MINT, C2D_AlignCenter, "Hold it flat and still, a hand's length away");
+    text(TOP_W / 2, 214, 0.42f, C_TEXT, C2D_AlignCenter, "Won't read? Press X to type the numbers");
 }
 
 static void draw_food_list(const Food *foods, int count, int sel, int scroll, float y0, u32 accent)
@@ -2500,25 +2616,34 @@ static void card_bg(void)
 static void food_card(const Food *f, float grams, bool quick)
 {
     card_bg();
-    text(14, 12, 0.55f, C_TEXT, 0, "%.34s", f->name);
+    const float W = BOT_W - 28; /* text width inside the card */
+    /* one item per line, so nothing can overlap */
+    text_fit(14, 11, 0.55f, W, C_TEXT, 0, "%.48s", f->name);
+    char sub[96] = "";
     if (!quick && f->brand[0])
-        text(14, 29, 0.45f, C_MUTED, 0, "%.28s", f->brand);
-    if (!quick && f->serving_g > 0)
-        text(BOT_W - 14, 29, 0.42f, C_MUTED, C2D_AlignRight, "Serving: %.16s%s%.0f g", f->serving_label,
-             f->serving_label[0] ? " = " : "", f->serving_g);
+        snprintf(sub, sizeof sub, "%.30s", f->brand);
+    if (!quick && f->serving_g > 0) {
+        size_t n = strlen(sub);
+        snprintf(sub + n, sizeof sub - n, "%sServing: %.20s%s%.0f g", n ? "   " : "", f->serving_label,
+                 f->serving_label[0] ? " = " : "", f->serving_g);
+    }
+    if (sub[0])
+        text_fit(14, 27, 0.42f, W, C_MUTED, 0, "%s", sub);
+
     Entry e;
     memset(&e, 0, sizeof e);
     e.food = *f;
     e.grams = quick ? 100 : (grams > 0 ? grams : 100);
     Totals t = entry_totals(&e);
     if (quick)
-        text(14, 47, 0.5f, C_TURQ, 0, "%.0f kcal", t.kcal);
+        text(14, 40, 0.5f, C_TURQ, 0, "%.0f kcal", t.kcal);
     else
-        text(14, 47, 0.5f, C_TURQ, 0, "%.0f kcal in %.0f g", t.kcal, e.grams);
-    /* up to three key micronutrients this food lists */
-    char micros[64] = "";
+        text(14, 40, 0.5f, C_TURQ, 0, "%.0f kcal in %.0f g", t.kcal, e.grams);
+
+    /* the key micronutrients this food lists, on their own line */
+    char micros[96] = "";
     int shown = 0;
-    for (int i = 0; i < MICRO_KEY_COUNT && shown < 3; i++) {
+    for (int i = 0; i < MICRO_KEY_COUNT; i++) {
         if (t.micro[i] <= 0)
             continue;
         char v[16];
@@ -2529,16 +2654,17 @@ static void food_card(const Food *f, float grams, bool quick)
         shown++;
     }
     if (shown > 0)
-        text(BOT_W - 14, 49, 0.4f, C_MUTED, C2D_AlignRight, "%s", micros);
+        text_fit(14, 56, 0.4f, W, C_MUTED, 0, "%s", micros);
 
-    /* three macro chips, green -> turquoise -> blue */
+    /* three macro chips, green -> turquoise -> blue: name on top, grams below */
     float cw = (BOT_W - 12 - 16 - 16) / 3;
     const char *names[3] = {"Protein", "Carbs", "Fat"};
     float vals[3] = {t.protein, t.carbs, t.fat};
     for (int i = 0; i < 3; i++) {
         float x = 14 + i * (cw + 8);
-        rrect_grad(x, 70, cw, 26, 8, x / BOT_W, (x + cw) / BOT_W);
-        text(x + cw / 2, 75, 0.45f, C_INK, C2D_AlignCenter, "%s %.1f g", names[i], vals[i]);
+        rrect_grad(x, 71, cw, 29, 8, x / BOT_W, (x + cw) / BOT_W);
+        text(x + cw / 2, 72, 0.4f, C_INK, C2D_AlignCenter, "%s", names[i]);
+        text(x + cw / 2, 84, 0.45f, C_INK, C2D_AlignCenter, "%.1f g", vals[i]);
     }
 }
 
@@ -2623,11 +2749,15 @@ static void draw_details(void)
     Tab t = g_tab;
     int count = list_count(t);
     if (g_scanning) {
-        hint_card("Scanning for a barcode...", "Works with EAN-13, UPC-A and EAN-8 codes");
+        hint_card("Scanning for a barcode...", "Won't read? X lets you type the numbers instead");
         return;
     }
     if (g_unit_picking) {
         food_card(&g_unit_food, g_unit_food.serving_g, false);
+        return;
+    }
+    if (g_code_picking) {
+        hint_card("Type the numbers under the barcode", "Pick the kind first, then type all the digits");
         return;
     }
     if (t == TAB_TODAY && g_show_micros) {
@@ -2798,6 +2928,8 @@ int main(void)
         C2D_SceneBegin(top);
         if (g_scanning) {
             draw_top_scanner();
+        } else if (g_code_picking) {
+            draw_code_picker();
         } else if (g_unit_picking) {
             draw_unit_picker();
         } else switch (g_tab) {
