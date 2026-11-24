@@ -87,6 +87,7 @@ typedef enum {
     PR_HEIGHT,
     PR_BMI,
     PR_BODY_FAT,
+    PR_ACTIVITY,
     PR_KCAL,
     PR_PROTEIN,
     PR_CARBS,
@@ -816,6 +817,10 @@ static void edit_profile_row(ProfileRow row)
             p->body_fat = v;
             save_profile();
         }
+        break;
+    case PR_ACTIVITY:
+        p->activity = (Activity)((p->activity + 1) % ACTIVITY_COUNT);
+        save_profile();
         break;
     case PR_KCAL: edit_target("Daily calories", &g_targets.kcal); break;
     case PR_PROTEIN: edit_target("Daily protein (g)", &g_targets.protein); break;
@@ -1613,8 +1618,9 @@ static void draw_top_meals(void)
 }
 
 /* ---- profile, report, charts ------------------------------------------- */
-static const char *ROW_LABELS[PR_COUNT] = {"Age",      "Sex",     "Weight", "Height", "BMI",
-                                           "Body fat", "Calories", "Protein", "Carbs", "Fat"};
+static const char *ROW_LABELS[PR_COUNT] = {"Age",      "Sex",      "Weight",   "Height",
+                                           "BMI",      "Body fat", "Activity", "Calories",
+                                           "Protein",  "Carbs",    "Fat"};
 
 static float profile_row_y(int row)
 {
@@ -1649,6 +1655,7 @@ static void profile_value(ProfileRow row, char *out, size_t size)
         if (p->body_fat > 0) snprintf(out, size, "%.0f %%", p->body_fat);
         else snprintf(out, size, "not set");
         break;
+    case PR_ACTIVITY: snprintf(out, size, "%s", activity_name(p->activity)); break;
     case PR_KCAL: snprintf(out, size, "%.0f kcal", g_targets.kcal); break;
     case PR_PROTEIN: snprintf(out, size, "%.0f g", g_targets.protein); break;
     case PR_CARBS: snprintf(out, size, "%.0f g", g_targets.carbs); break;
@@ -1688,9 +1695,10 @@ static void draw_page_report(void)
         return;
     }
     Totals t = sum_entries(g_day.entries, g_day.count, -1);
+    float basic = rest * (activity_factor(g_profile.activity) - 1.0f);
     float steps = steps_kcal(g_step_total, kg, g_profile.height_cm);
     float workouts = workouts_total(&g_workouts);
-    float burned = rest + steps + workouts;
+    float burned = rest + basic + workouts;
 
     /* two big numbers */
     float cw = (TOP_W - 30) / 2;
@@ -1718,11 +1726,14 @@ static void draw_page_report(void)
     text(20, y, 0.45f, C_MUTED, 0, "Resting (BMR)");
     text(TOP_W - 12, y, 0.45f, C_TEXT, C2D_AlignRight, "%.0f kcal", rest);
     y += 14;
-    text(20, y, 0.45f, C_MUTED, 0, "Steps (%u)", g_step_total);
-    text(TOP_W - 12, y, 0.45f, C_TEXT, C2D_AlignRight, "%.0f kcal", steps);
+    text(20, y, 0.45f, C_MUTED, 0, "Basic activity (%s)", activity_name(g_profile.activity));
+    text(TOP_W - 12, y, 0.45f, C_TEXT, C2D_AlignRight, "%.0f kcal", basic);
     y += 14;
     text(20, y, 0.45f, C_MUTED, 0, "Workouts (%d)", (int)g_workouts.count);
     text(TOP_W - 12, y, 0.45f, C_TEXT, C2D_AlignRight, "%.0f kcal", workouts);
+    if (g_step_total > 0)
+        text(TOP_W - 12, 122, 0.4f, C_TURQ, C2D_AlignRight, "Heads up: %u steps = about %.0f kcal", g_step_total,
+             steps);
 
     /* where the eaten energy came from */
     y += 20;
@@ -2007,6 +2018,7 @@ static const char *ROW_HELP[PR_COUNT] = {
     "In centimeters",
     "Worked out from weight and height",
     "Optional, in percent",
+    "A cycles: how active a normal day is",
     "Your daily calorie goal",
     "Your daily protein goal",
     "Your daily carbs goal",
@@ -2019,14 +2031,14 @@ static void draw_profile_details(void)
         int row = g_sel[TAB_PROFILE];
         hint_card(ROW_LABELS[row], ROW_HELP[row]);
     } else if (g_page == PAGE_REPORT) {
-        hint_card("Eaten vs burned", "Burned = resting + steps + workouts");
+        hint_card("Eaten vs burned", "Burned = resting + basic activity + workouts");
     } else if (g_page == PAGE_ACTIVITY) {
         if (g_picking)
             hint_card("Pick a workout", "Calories use your weight and the minutes");
         else if (!pedometer_available())
             hint_card("Step counter not available", "Workouts still count");
         else
-            hint_card("Steps come from your 3DS", "Carry it closed or in sleep mode");
+            hint_card("Steps are a heads-up", "Basic activity already covers them");
     } else {
         if (g_week_dirty)
             compute_week();

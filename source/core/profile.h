@@ -9,11 +9,21 @@
 
 typedef enum { SEX_MALE = 0, SEX_FEMALE = 1 } Sex;
 
+typedef enum {
+    ACTIVITY_SEDENTARY = 0,
+    ACTIVITY_LIGHT,
+    ACTIVITY_MODERATE,
+    ACTIVITY_ACTIVE,
+    ACTIVITY_VERY_ACTIVE,
+    ACTIVITY_COUNT
+} Activity;
+
 typedef struct {
     int age;          /* years, 0 if unknown */
     Sex sex;
     float height_cm;  /* 0 if unknown */
     float body_fat;   /* percent, 0 if unknown */
+    Activity activity;
 } UserProfile;
 
 /* One number per date: body weight (weights.json) or steps (steps.json,
@@ -31,6 +41,10 @@ typedef struct {
     SeriesPoint items[CT_MAX_SERIES]; /* sorted by date, oldest first */
     size_t count;
 } Series;
+
+const char *activity_name(Activity a);
+/* Multiplier on BMR for everyday (non-exercise) activity. */
+float activity_factor(Activity a);
 
 /* Body mass index, or 0 if weight or height is missing. */
 float bmi(float kg, float height_cm);

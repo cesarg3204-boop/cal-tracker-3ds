@@ -265,18 +265,22 @@ static void test_profile(void)
     p.sex = SEX_MALE;
     p.height_cm = 170;
     p.body_fat = 15;
+    p.activity = ACTIVITY_LIGHT;
     /* Matches Cronometer: 10*53 + 6.25*170 - 5*14 + 5 = 1527.5 */
     CHECK(fabsf(bmr(&p, 53) - 1527.5f) < 0.1f);
     CHECK(fabsf(bmi(53, 170) - 18.34f) < 0.01f);
     CHECK(bmi(0, 170) == 0 && bmr(&p, 0) == 0);
     p.sex = SEX_FEMALE;
     CHECK(fabsf(bmr(&p, 53) - 1361.5f) < 0.1f);
+    CHECK(activity_factor(ACTIVITY_SEDENTARY) < activity_factor(ACTIVITY_VERY_ACTIVE));
+    /* Cronometer's default "basic activity" is half of BMR */
+    CHECK(NEAR(activity_factor(ACTIVITY_MODERATE), 1.5f));
 
     char dir[] = "/tmp/ct_prof_XXXXXX";
     CHECK(mkdtemp(dir) != NULL);
     CHECK(storage_init(dir) == 0);
     UserProfile q;
-    CHECK(profile_load(&q) == 0 && q.age == 0);
+    CHECK(profile_load(&q) == 0 && q.age == 0 && q.activity == ACTIVITY_MODERATE);
     CHECK(profile_save(&p) == 0);
     CHECK(profile_load(&q) == 0);
     CHECK(q.age == 14 && q.sex == SEX_FEMALE && NEAR(q.height_cm, 170) && NEAR(q.body_fat, 15));

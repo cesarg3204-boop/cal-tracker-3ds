@@ -22,9 +22,9 @@ A standalone calorie and macro tracker for the Nintendo 3DS (homebrew). It keeps
 - **Saved meals:** on Meals, tap *+ New meal* and name it. Then pick foods the same way you log them: A on Search, Favs or Brands adds the food to the meal instead of your day. *Quick item* adds a name with macros. Tap the strip at the bottom to go back and *Save meal*. Log it later from the Meals tab, normal size or scaled.
 - **My Brands:** follow brands like Quest or Barebells and browse their products. Small typos are fixed for you (typing "goodless" finds Goodles and renames the tile). Product lists are saved for offline use; Y refreshes.
 - **Profile** (Left/Right switch pages):
-  - *Profile:* age, sex, weight log, height, BMI, body fat and your daily targets.
-  - *Activity:* today's steps straight from the 3DS step counter (with an hourly chart), and your workouts. Pick a workout type (weights, running, soccer...) and the minutes; calories come from your weight. *Other* lets you type the calories yourself.
-  - *Report:* eaten vs burned for the day. Burned is resting energy (Mifflin-St Jeor BMR) plus steps plus workouts.
+  - *Profile:* age, sex, weight log, height, BMI, body fat, activity level and your daily targets.
+  - *Activity:* today's steps straight from the 3DS step counter (with an hourly chart) and roughly what they burned, as a heads-up, plus your workouts. Pick a workout type (weights, running, soccer...) and the minutes; calories come from your weight. *Other* lets you type the calories yourself.
+  - *Report:* eaten vs burned for the day. Burned is resting energy (Mifflin-St Jeor BMR) plus basic activity (from your activity level) plus workouts. Steps are shown next to it but not added, since basic activity already covers normal walking.
   - *Charts:* calories per day for the week, split into protein, carbs and fat, and a weight line.
 - Steps are worth about 0.5 kcal per kg per km walked, with your stride worked out from your height. Workouts use MET values from the Compendium of Physical Activities, minus resting energy so nothing is counted twice.
 - HOME menu banner: one macaroni with a short jingle (CIA only; made by `tools/make_assets.py`).
