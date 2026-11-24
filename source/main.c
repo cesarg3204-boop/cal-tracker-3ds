@@ -1001,7 +1001,11 @@ static void lookup_product(void)
     }
     char *body = NULL;
     if (net_get(url, &body, err, sizeof err) != 0) {
-        status("Lookup failed: %s", err);
+        /* Open Food Facts answers 404 for products it doesn't have */
+        if (strstr(err, "HTTP 404"))
+            status("%s isn't in Open Food Facts yet. Try Search or Quick add", g_barcode);
+        else
+            status("Lookup failed: %s", err);
         return;
     }
     Food f;
