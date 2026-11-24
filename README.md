@@ -27,7 +27,13 @@ A standalone calorie and macro tracker for the Nintendo 3DS (homebrew). It keeps
   - *Report:* eaten vs burned for the day. Burned is resting energy (Mifflin-St Jeor BMR) plus basic activity (from your activity level) plus workouts. Steps are shown next to it but not added, since basic activity already covers normal walking.
   - *Charts:* calories per day for the week, split into protein, carbs and fat, and a weight line.
 - Steps are worth about 0.5 kcal per kg per km walked, with your stride worked out from your height. Workouts use MET values from the Compendium of Physical Activities, minus resting energy so nothing is counted twice.
-- HOME menu banner: one macaroni with a short jingle (CIA only; made by `tools/make_assets.py`).
+- **Barcode scanner:** tap *Scan* on Today (or *Scan barcode* on Search) and point the outer camera at an EAN-13, UPC-A or EAN-8 barcode. The product is looked up on Open Food Facts and opens in Search, ready to log with A.
+- **Micronutrients:** fiber, sugar, sodium, iron and zinc sit under the macros on Today. *All micros* shows all 14 (also saturated fat, cholesterol, calcium, magnesium, potassium and vitamins A, C, D and B12) against US reference amounts for your age and sex. Sugar, sodium, saturated fat and cholesterol are shown as daily maximums. Many products don't list micronutrients, so real totals are often higher.
+- **Water:** *+ Water* and *-* on Today (or ZR / ZL) count glasses of 250 ml. Set the goal in Profile.
+- **Streak:** a goal day means calories within 10% of your target and at least 90% of your protein target. The flame on Today counts goal days in a row.
+- **Mascot:** a little macaroni lives on Today. It cheers when you reach your protein goal and wears a party hat on a 3+ day streak.
+- **Sounds:** soft effects for logging, water, goals, scanning and switching tabs, made in code. Turn them off in Profile. They need the DSP firmware (`sdmc:/3ds/dspfirm.cdc`, made during the usual homebrew setup); without it the app is silent.
+- HOME menu banner: one macaroni with an original ocarina-style tune over a harp chord (CIA only; made by `tools/make_assets.py`).
 - "Adding to" picker on the bottom screen (or Left/Right) chooses the meal food goes into.
 
 ## Controls (plain version)
