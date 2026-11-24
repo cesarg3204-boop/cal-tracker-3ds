@@ -1,0 +1,15 @@
+# Builds and runs the portable core tests on your PC (needs gcc or clang).
+CC ?= cc
+CFLAGS ?= -std=c11 -Wall -Wextra -O1 -g -D_DEFAULT_SOURCE
+
+SRCS = tests/test_core.c source/core/food.c source/core/date.c \
+       source/core/storage.c source/core/off.c source/core/profile.c source/lib/cJSON.c
+
+test: build-tests/test_core
+	./build-tests/test_core
+
+build-tests/test_core: $(SRCS)
+	@mkdir -p build-tests
+	$(CC) $(CFLAGS) $(SRCS) -lm -o $@
+
+.PHONY: test

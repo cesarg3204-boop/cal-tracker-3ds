@@ -1,0 +1,129 @@
+name: Build
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  core-tests:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Run core tests
+        run: make -f Makefile.tests
+
+  build-3dsx:
+    runs-on: ubuntu-latest
+    container: devkitpro/devkitarm:latest
+    steps:
+      - uses: actions/checkout@v4
+      # The devkitarm image already ships the 3DS portlibs, and pkg.devkitpro.org
+      # refuses package downloads from CI runners, so only check that they are there.
+      - name: Check portlibs
+        run: |
+          ls $DEVKITPRO/portlibs/3ds/lib
+          test -f $DEVKITPRO/portlibs/3ds/lib/libcurl.a
+      - name: Build
+        run: make
+      - uses: actions/upload-artifact@v4
+        with:
+          name: cal-pop
+          path: cal-pop.3dsx
+      # Inputs for the CIA job (makerom needs the ELF, not the 3dsx).
+      - uses: actions/upload-artifact@v4
+        with:
+          name: cia-inputs
+          path: |
+            cal-pop.elf
+            cal-pop.smdh
+          retention-days: 1
+
+  build-cia:
+    needs: build-3dsx
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/checkout@v4
+        with:
+          repository: 3DSGuy/Project_CTR
+          path: project_ctr
+          fetch-depth: 0
+      - name: Build makerom
+        working-directory: project_ctr/makerom
+        run: make PROJECT_PLATFORM_ARCH=x86_64 deps all
+      - name: Build ctrtool
+        working-directory: project_ctr/ctrtool
+        run: make PROJECT_PLATFORM_ARCH=x86_64 deps all
+      # bannertool turns meta/banner.png and meta/banner.wav into the HOME menu
+      # banner (the picture and jingle you get when the app is selected).
+      - uses: actions/checkout@v4
+        with:
+          repository: carstene1ns/3ds-bannertool
+          path: bannertool
+      - name: Build bannertool
+        working-directory: bannertool
+        run: cmake -B build -DCMAKE_BUILD_TYPE=Release && cmake --build build -j
+      - name: Make banner
+        run: |
+          bannertool/build/bannertool makebanner -i meta/banner.png -a meta/banner.wav -o cal-pop.bnr
+          ls -l cal-pop.bnr
+      - uses: actions/download-artifact@v4
+        with:
+          name: cia-inputs
+      - name: Make CIA
+        run: |
+          project_ctr/makerom/bin/makerom -f cia -o cal-pop.cia -target t -exefslogo \
+            -elf cal-pop.elf -icon cal-pop.smdh -banner cal-pop.bnr -rsf meta/app.rsf \
+            -major 0 -minor 1 -micro 0 \
+            -DAPP_TITLE="CalPop" \
+            -DAPP_PRODUCT_CODE="CTR-H-CPOP" \
+            -DAPP_UNIQUE_ID=0xFCA18 \
+            -DAPP_ROMFS=romfs \
+            -DAPP_CATEGORY=Application \
+            -DAPP_USE_ON_SD=true \
+            -DAPP_ENCRYPTED=false \
+            -DAPP_MEMORY_TYPE=Application \
+            -DAPP_SYSTEM_MODE=64MB \
+            -DAPP_SYSTEM_MODE_EXT=Legacy \
+            -DAPP_CPU_SPEED=268MHz \
+            -DAPP_ENABLE_L2_CACHE=false \
+            -DAPP_VERSION_MAJOR=0
+          ls -l cal-pop.cia
+      - name: Check the CIA
+        run: |
+          head -c 32 cal-pop.cia | od -A d -t x1
+          project_ctr/ctrtool/bin/ctrtool -i cal-pop.cia
+      - uses: actions/upload-artifact@v4
+        with:
+          name: cal-pop-cia
+          path: cal-pop.cia
+
+  # Run by hand (Actions > Build > Run workflow): publishes the CIA as the
+  # "cal-pop-latest" release, so FBI can install it from a QR code.
+  release:
+    if: github.event_name == 'workflow_dispatch'
+    needs: build-cia
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: cal-pop-cia
+      - uses: actions/download-artifact@v4
+        with:
+          name: cal-pop
+      - name: Publish release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+        run: |
+          if gh release view cal-pop-latest >/dev/null 2>&1; then
+            gh release upload cal-pop-latest cal-pop.cia cal-pop.3dsx --clobber
+          else
+            gh release create cal-pop-latest cal-pop.cia cal-pop.3dsx --prerelease \
+              --target "$GITHUB_SHA" --title "Cal Pop (latest build)" \
+              --notes "Scan the QR code in FBI (Remote Install > Scan QR Code) to install cal-pop.cia."
+          fi
